@@ -177,11 +177,14 @@ def load_eia860_plants() -> pd.DataFrame:
             try:
                 praw = pd.read_excel(io.BytesIO(z.read(plant_file)), sheet_name=0,
                                      header=None, nrows=3, dtype=str)
+                # Scan for "Plant Code" or "Latitude" — case sensitive to match actual header
                 p_header = 1
-                for i in range(min(5, len(praw))):
-                    row_vals = [str(v).lower() for v in praw.iloc[i].values if str(v) != 'nan']
-                    if any("plant" in v or "latitude" in v for v in row_vals):
-                        p_header = i; break
+                for i in range(min(6, len(praw))):
+                    row_text = " ".join(str(v) for v in praw.iloc[i].values)
+                    if "Plant Code" in row_text or "Latitude" in row_text or "latitude" in row_text.lower():
+                        p_header = i
+                        log.info(f"Plant file header row found at row {i}")
+                        break
                 pdata = pd.read_excel(io.BytesIO(z.read(plant_file)), sheet_name=0,
                                       skiprows=p_header, dtype=str)
                 pdata.columns = [str(c).strip().lower().replace(" ","_") for c in pdata.columns]
