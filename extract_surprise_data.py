@@ -66,7 +66,7 @@ def extract_surprise_sheet(ws):
         label = str(row[0]).strip() if row[0] else ''
         stripped = label.lstrip()
 
-        if 'EPS Normalized' in stripped and not label.startswith(' '):
+        if any(k in stripped for k in ('EPS Normalized', 'EPS (GAAP)', 'EPS Diluted')) and not label.startswith(' '):
             in_eps = True
             for ci, pl in zip(col_indices, period_labels):
                 surprise_pct[pl] = safe_float(row[ci]) if ci < len(row) else None
