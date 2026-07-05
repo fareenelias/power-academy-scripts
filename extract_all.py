@@ -536,6 +536,48 @@ def safe_value_m(v):
         return None
 
 
+US_STATES = {
+    'Alabama','Alaska','Arizona','Arkansas','California','Colorado','Connecticut',
+    'Delaware','Florida','Georgia','Hawaii','Idaho','Illinois','Indiana','Iowa',
+    'Kansas','Kentucky','Louisiana','Maine','Maryland','Massachusetts','Michigan',
+    'Minnesota','Mississippi','Missouri','Montana','Nebraska','Nevada',
+    'New Hampshire','New Jersey','New Mexico','New York','North Carolina',
+    'North Dakota','Ohio','Oklahoma','Oregon','Pennsylvania','Rhode Island',
+    'South Carolina','South Dakota','Tennessee','Texas','Utah','Vermont',
+    'Virginia','Washington','West Virginia','Wisconsin','Wyoming',
+}
+
+GENERATION_INDUSTRIES = {
+    'Renewable Electricity', 'Thermal Electricity', 'Nuclear Electricity',
+    'Independent Power Producers & Energy Traders',
+}
+
+def parse_mw(name):
+    if not name: return None
+    m = re.search(r'(\d+(?:\.\d+)?)\s*[-]?\s*(?:MW|megawatt)', name, re.I)
+    if m: return float(m.group(1))
+    m = re.search(r'(\d+(?:\.\d+)?)\s*[-]?\s*GW', name, re.I)
+    if m: return float(m.group(1)) * 1000
+    return None
+
+def parse_asset_count(name):
+    if not name: return None
+    words = {'two':2,'three':3,'four':4,'five':5,'six':6,'seven':7,'eight':8,'nine':9,'ten':10}
+    first = name.split()[0].lower()
+    if first in words: return words[first]
+    m = re.match(r'^(\d+)\s+', name)
+    if m:
+        n = int(m.group(1))
+        return n if n > 1 else None
+    return None
+
+def parse_asset_state(name):
+    if not name: return None
+    clean = name.rstrip('*').strip()
+    for state in US_STATES:
+        if clean.endswith(state): return state
+    return None
+
 METADATA_PREFIXES = (
     'Transaction Type:', 'Include Transaction', 'Private Equity',
     'Target/Issuer', 'Group By:', 'Geography:', 'Date Range:',
@@ -593,21 +635,81 @@ def extract_ma(ws):
             continue
         seen_ids.add(txn_id)
 
+        target   = safe_str(row[3] if len(row) > 3 else None)
+        value_m  = safe_value_m(row[7] if len(row) > 7 else None)
+        industry = safe_str(row[11] if len(row) > 11 else None)
+        is_gen   = industry in GENERATION_INDUSTRIES
+
+        capacity_mw   = parse_mw(target) if is_gen else None
+        asset_state   = parse_asset_state(target)
+        asset_count   = parse_asset_count(target)
+        dollar_per_kw = round(value_m * 1000 / capacity_mw, 0) if (is_gen and capacity_mw and value_m) else None
+
         deals.append({
-            'transaction_id': txn_id,
-            'announced':      safe_date(row[1] if len(row) > 1 else None),
-            'completed':      safe_date_or_status(row[2] if len(row) > 2 else None),
-            'target':         safe_str(row[3] if len(row) > 3 else None),
-            'buyer':          safe_str(row[4] if len(row) > 4 else None),
-            'seller':         safe_str(row[5] if len(row) > 5 else None),
-            'role':           safe_str(row[6] if len(row) > 6 else None),
-            'value_m':        safe_value_m(row[7] if len(row) > 7 else None),
-            'acq_or_sale':    safe_str(row[8] if len(row) > 8 else None),
-            'deal_type':      safe_str(row[9] if len(row) > 9 else None),
-            'sector':         sector,
+            'transaction_id':  txn_id,
+            'announced':       safe_date(row[1] if len(row) > 1 else None),
+            'completed':       safe_date_or_status(row[2] if len(row) > 2 else None),
+            'target':          target,
+            'buyer':           safe_str(row[4] if len(row) > 4 else None),
+            'seller':          safe_str(row[5] if len(row) > 5 else None),
+            'role':            safe_str(row[6] if len(row) > 6 else None),
+            'value_m':         value_m,
+            'acq_or_sale':     safe_str(row[8] if len(row) > 8 else None),
+            'deal_type':       safe_str(row[9] if len(row) > 9 else None),
+            'target_industry': industry,
+            'is_generation':   is_gen,
+            'capacity_mw':     capacity_mw,
+            'asset_state':     asset_state,
+            'asset_count':     asset_count,
+            'dollar_per_kw':   dollar_per_kw,
+            'sector':          sector,
+            'advisors':        [],
         })
 
     return deals
+
+
+
+def extract_advisors(ws):
+    """
+    Parse Advisers sheet M&A section.
+    Returns {sptrd_id: ['Bank A', 'Bank B', ...]}
+    Multi-bank deals have blank col0 continuation rows.
+    """
+    advisor_map = {}
+    in_ma = False
+    hdr_seen = False
+    current_id = None
+
+    for row in ws.iter_rows(values_only=True):
+        col0 = str(row[0]).strip() if row[0] is not None else ''
+
+        if col0 == 'M&A Advisers':
+            in_ma = True; hdr_seen = False; continue
+        if col0 == 'Offering Underwriters':
+            break
+        if not in_ma:
+            continue
+        if col0 == 'Transaction ID':
+            hdr_seen = True; continue
+        if not hdr_seen:
+            continue
+
+        bank = str(row[7]).strip() if len(row) > 7 and row[7] else ''
+        bank = bank.strip()
+        if bank.upper() in ('NA', 'N/A', ''):
+            bank = None
+
+        if col0.startswith('SPTRD'):
+            current_id = col0
+            if current_id not in advisor_map:
+                advisor_map[current_id] = []
+            if bank:
+                advisor_map[current_id].append(bank)
+        elif col0 == '' and current_id and bank:
+            advisor_map[current_id].append(bank)
+
+    return advisor_map
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -731,9 +833,15 @@ def main():
         ma_deals = []
         if 'Detailed M&A History' in sheets:
             ma_deals = extract_ma(wb['Detailed M&A History'])
+        if 'Advisers' in sheets:
+            adv_map = extract_advisors(wb['Advisers'])
+            for deal in ma_deals:
+                deal['advisors'] = adv_map.get(deal['transaction_id'], [])
         companies[ticker]['ma_history'] = ma_deals
         stats['ma'] += len(ma_deals)
-        print(f'         m&a         {len(ma_deals):2d} deals')
+        gen_ct = sum(1 for d in ma_deals if d.get('is_generation'))
+        adv_ct = sum(1 for d in ma_deals if d.get('advisors'))
+        print(f'         m&a         {len(ma_deals):2d} deals ({gen_ct} gen  {adv_ct} w/banks)')
 
         wb.close()
 
