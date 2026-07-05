@@ -118,14 +118,10 @@ updated = 0
 for fname in os.listdir(REPORTS_DIR):
     if not fname.endswith('.xlsx'): continue
     # Extract ticker from filename e.g. "EntergyCorporationNYSEETR_Report..."
-    m = re.search(r'(?:NYSE|NASD|NMS|NYS)[:\s]?([A-Z]{1,5})[\._]', fname, re.I)
+    m = re.search(r'(?:NYSE|NASDAQGS|NASDAQGM|NASDAQCM|NASDAQ|NasdaqGS|NasdaqCM|OTC)([A-Z0-9]+)_Report', fname)
     if not m:
-        # try last uppercase segment before _Report
-        m2 = re.search(r'([A-Z]{2,5})_Report', fname)
-        if m2: ticker = m2.group(1)
-        else: continue
-    else:
-        ticker = m.group(1).upper()
+        continue
+    ticker = m.group(1)
 
     if ticker not in companies: continue
 
