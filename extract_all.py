@@ -1,4 +1,4 @@
-"""
+r"""
 extract_all.py  —  Master CapIQ Excel Extractor
 Power Academy | Weekly workflow
 
@@ -19,6 +19,13 @@ Preserves all other fields in capiq_export.json unchanged
 Outputs:
   E:\PowerAcademy\data\capiq_export.json       updated in place
   E:\PowerAcademy\data\executives_export.json  full rebuild each run
+
+Also (extended data layers, added this session):
+  - Rips any new earnings-call transcripts via rip_earnings.py (incremental)
+  - Health-checks earnings_calls.json (call-notes) and rra_states.json (RRA):
+    coverage vs the 23-name universe, Q&A page-link coverage, deck flags,
+    ripped-but-not-yet-built transcripts, and pending RRA placeholders.
+  (Building call-notes entries from the ripped .txt stays a manual in-Claude step.)
 """
 
 import os, re, glob, json
@@ -38,6 +45,22 @@ REPORTS_DIR   = r'E:\PowerAcademy\data\reports'
 CAPIQ_JSON    = r'E:\PowerAcademy\data\capiq_export.json'
 EXECS_JSON    = r'E:\PowerAcademy\data\executives_export.json'
 TODAY         = datetime.now().strftime('%m-%d-%Y')
+
+# ── Extended data layers (added: RRA + earnings call notes) ────────────────────
+EARNINGS_JSON   = r'E:\PowerAcademy\data\earnings_calls.json'
+RRA_JSON        = r'E:\PowerAcademy\data\rra_states.json'
+TRANSCRIPTS_DIR = r'E:\PowerAcademy\Documents\transcripts'
+RIP_SCRIPT      = r'E:\PowerAcademy\scripts\rip_earnings.py'
+
+# 23-name coverage universe (for call-notes coverage reporting)
+COVERAGE_UNIVERSE = [
+    'NEE','D','ETR','CMS','PPL','AEE','POR','EIX','PCG','HE','EVRG','ES','VST','TLN','XIFR',
+    'AWR','CWT','YORW','GWRS','AWK','WTRG','HTO','MSEX',
+]
+
+# Tickers that do NOT hold earnings calls (small water utilities) - excluded from
+# call-notes coverage gaps rather than flagged as missing.
+NO_CALL_TICKERS = {'YORW', 'MSEX'}
 
 
 # ── Ticker extraction ─────────────────────────────────────────────────────────
@@ -711,7 +734,293 @@ def extract_advisors(ws):
 
     return advisor_map
 
+
+# ── Credit Sheets ─────────────────────────────────────────────────────────────
+#
+# Capital Structure Details: row 8 = header, data from row 9
+#   0:Description | 1:Type | 2:Amount($K) | 3:Coupon | 4:FloatingRate
+#   5:MaturityDate | 6:Seniority | 7:Secured
+#
+# Current Ratings: sections per agency, each with "Rating Type" header row
+#   0:RatingType | 1:Rating | 2:RatingDate | 3:LastReview | 4:PrevRating
+#   5:Action | 6:Outlook | 7:OutlookDate
+#
+# Credit Ratios (x): simple key-value, col0=metric, col1=value (current quarter)
+
+def parse_maturity_year(v):
+    """Extract 4-digit year from maturity date string."""
+    if not v: return None
+    s = str(v).strip()
+    if s.upper() in ('NA','N/A',''): return None
+    # Range like "2028 - 2065": use first year
+    if ' - ' in s: s = s.split(' - ')[0].strip()
+    m = re.search(r'\b(20\d{2})\b', s)
+    return int(m.group(1)) if m else None
+
+
+def extract_credit_details(ws):
+    """Extract per-instrument debt from Capital Structure Details sheet."""
+    instruments = []
+    header_seen = False
+    for row in ws.iter_rows(values_only=True):
+        col0 = str(row[0]).strip() if row[0] else ''
+        if col0 == 'Capital Structure Description':
+            header_seen = True; continue
+        if not header_seen or not col0: continue
+        # Skip summary/footnote rows
+        if col0.startswith('Total') or col0.startswith('*'): continue
+        # Amount
+        raw_amt = row[2] if len(row) > 2 else None
+        try:
+            amt_k = int(float(str(raw_amt).replace(',',''))) if raw_amt and str(raw_amt).strip().upper() not in ('NA','') else None
+        except Exception:
+            amt_k = None
+        if not amt_k or amt_k <= 0: continue
+        maturity_raw = str(row[5]).strip() if len(row) > 5 and row[5] else None
+        if maturity_raw and str(maturity_raw).upper() in ('NA','N/A',''): maturity_raw = None
+        # Infer issuing entity from description prefix or security type
+        seniority = safe_str(row[6] if len(row) > 6 else None) or ''
+        secured   = safe_str(row[7] if len(row) > 7 else None) or ''
+        # First word may be a known abbreviation (SCE, DVP, AEE-MO, etc.)
+        first_word = col0.split()[0] if col0 else ''
+        if re.match(r'^[A-Z]{2,5}$', first_word) and len(col0.split()) > 1:
+            inferred_entity = first_word
+        elif 'First Mortgage' in col0 or ('Secured' in seniority and secured == 'Yes'):
+            inferred_entity = 'OpCo (secured)'
+        elif 'Junior Subordinated' in col0 or 'Junior Sub' in col0:
+            inferred_entity = 'HoldCo (hybrid)'
+        elif secured == 'No' and 'Senior' in seniority:
+            inferred_entity = 'HoldCo (unsecured)'
+        else:
+            inferred_entity = None
+
+        instruments.append({
+            'description':    col0,
+            'type':           safe_str(row[1] if len(row) > 1 else None),
+            'amount_k':       amt_k,
+            'coupon':         safe_str(row[3] if len(row) > 3 else None),
+            'floating_rate':  safe_str(row[4] if len(row) > 4 else None),
+            'maturity_raw':   maturity_raw,
+            'maturity_year':  parse_maturity_year(maturity_raw),
+            'seniority':      seniority or None,
+            'secured':        secured or None,
+            'issuing_entity': inferred_entity,
+        })
+    return instruments
+
+
+def extract_current_ratings(ws):
+    """Extract credit ratings by agency from Current Ratings sheet."""
+    ratings = []
+    current_agency = None
+    current_entity = None
+    header_seen    = False
+    AGENCY_KEYS    = ('S&P GLOBAL', 'MOODY', 'FITCH', 'DBRS', 'KBRA')
+
+    def fmt_dt(v):
+        if not v: return None
+        if isinstance(v, datetime): return v.strftime('%Y-%m-%d')
+        s = str(v).strip()[:10]
+        return s if re.match(r'\d{4}-\d{2}-\d{2}', s) else None
+
+    for row in ws.iter_rows(values_only=True):
+        col0 = str(row[0]).strip() if row[0] else ''
+        if any(kw in col0.upper() for kw in AGENCY_KEYS):
+            current_agency = col0.split('(')[0].strip()
+            # Entity name may be split: col0="...Entity Name:" col1="Dominion Energy Inc.)"
+            col1_str = str(row[1]).strip() if len(row) > 1 and row[1] else ''
+            full_line = col0 + (' ' + col1_str if col1_str else '')
+            em = re.search(r'Entity Name:\s*([^)]+)', full_line)
+            current_entity = em.group(1).strip().rstrip('.)') if em else None
+            header_seen = False; continue
+        if col0 == 'Rating Type':
+            header_seen = True; continue
+        if not header_seen or not col0: continue
+        if col0 in ('Issuer Credit Rating',): continue
+        rating_val = str(row[1]).strip() if len(row) > 1 and row[1] else None
+        if not rating_val or rating_val in ('',' '): continue
+        ratings.append({
+            'agency':      current_agency or 'Unknown',
+            'entity':      current_entity,
+            'rating_type': col0,
+            'rating':      rating_val,
+            'rating_date': fmt_dt(row[2] if len(row) > 2 else None),
+            'last_review': fmt_dt(row[3] if len(row) > 3 else None),
+            'prev_rating': safe_str(row[4] if len(row) > 4 else None),
+            'action':      safe_str(row[5] if len(row) > 5 else None),
+            'outlook':     safe_str(row[6] if len(row) > 6 else None),
+        })
+    return ratings
+
+
+
+def extract_debt_analysis(ws):
+    """
+    Extract interest coverage and coverage ratios from Debt Analysis sheet.
+    Returns dict with most-recent-year values.
+    Coverage Ratios section has header 'Coverage Ratios (x)' then key-value time-series rows.
+    Period cols: 2021 2022 2023 2024 2025 — rightmost non-None = most recent.
+    """
+    result = {}
+    in_coverage = False
+    recent_col  = None
+
+    for row in ws.iter_rows(values_only=True):
+        col0 = str(row[0]).strip() if row[0] else ''
+
+        # Find period header row: col0 blank, other cols have year-like values
+        # Handles 'Dec 2025', '12/2025 FY', 'FY 2025', '2025' etc.
+        if not col0 and any(v and re.search(r'20\d{2}', str(v)) for v in row[1:]):
+            period_cols = [i for i,v in enumerate(row)
+                           if v and re.search(r'20\d{2}', str(v))]
+            if period_cols: recent_col = period_cols[-1]
+            continue
+
+        if 'coverage ratio' in col0.lower() or col0.lower() == 'coverage ratios (x)':
+            in_coverage = True; continue
+
+        if col0 == 'Debt Detail - Current ($000)':
+            break  # past coverage section
+
+        if not in_coverage or not col0 or recent_col is None:
+            continue
+
+        v = row[recent_col] if recent_col < len(row) else None
+        try:
+            val = float(str(v)) if v and str(v).strip().upper() not in ('NA','NM','') else None
+        except Exception:
+            val = None
+
+        if col0 == 'Pre-tax Interest Coverage Excl. AFUDC':
+            result['interest_coverage']      = round(val, 2) if val else None
+        elif col0 == 'Recurring EBITDA/ Adjusted Interest Expense':
+            result['ebitda_interest_coverage']= round(val, 2) if val else None
+        elif col0 == 'Debt/ Recurring EBITDA':
+            result['debt_ebitda_snl']         = round(val, 2) if val else None
+
+    return result
+
+def extract_credit_ratios(ws):
+    """Extract pre-computed ratios from Credit Ratios (x) sheet."""
+    ratios = {}
+    for row in ws.iter_rows(max_row=20, values_only=True):
+        col0 = str(row[0]).strip() if row[0] else ''
+        col1 = row[1] if len(row) > 1 else None
+        if not col0 or col1 is None: continue
+        try:
+            val = float(str(col1).strip())
+            ratios[col0] = round(val, 3)
+        except Exception:
+            pass
+    return ratios
+
 # ── Main ──────────────────────────────────────────────────────────────────────
+
+# ── Extended layer: earnings call notes ───────────────────────────────────────
+
+def rip_transcripts():
+    """Incremental transcript rip: convert any newly-dropped earnings-call PDFs
+    to text (the source the call-notes entries are built from). No-op if the
+    ripper or transcripts folder isn't present. Building the structured entries
+    in earnings_calls.json from the resulting .txt remains a manual (in-Claude) step."""
+    if not os.path.isfile(RIP_SCRIPT) or not os.path.isdir(TRANSCRIPTS_DIR):
+        print('  [call notes] ripper or transcripts dir not found — skipping rip step')
+        return
+    import subprocess, sys
+    print(f'  [call notes] ripping new/changed transcripts under {TRANSCRIPTS_DIR} ...')
+    try:
+        subprocess.run([sys.executable, RIP_SCRIPT, TRANSCRIPTS_DIR], check=False)
+    except Exception as e:
+        print(f'  [call notes] rip step failed: {e}')
+
+
+def report_call_notes():
+    """Health-check earnings_calls.json: coverage vs the 23-name universe, call
+    counts, Q&A page-link coverage, deck-sourced flags, and any transcripts that
+    have been ripped but not yet built into entries."""
+    if not os.path.isfile(EARNINGS_JSON):
+        print('  [call notes] earnings_calls.json not found — skipping')
+        return
+    try:
+        data = json.load(open(EARNINGS_JSON, encoding='utf-8'))
+    except Exception as e:
+        print(f'  [call notes] could not read earnings_calls.json: {e}')
+        return
+    calls = data.get('calls', {})
+    total = sum(len(v) for v in calls.values())
+    qa_total = qa_nopage = 0
+    deck_flags = []
+    for tk, cc in calls.items():
+        for c in cc:
+            if c.get('_qc'):
+                deck_flags.append(f"{tk} {c.get('period','?')}")
+            for q in c.get('qa_highlights', []):
+                qa_total += 1
+                if not q.get('source_page'):
+                    qa_nopage += 1
+    callable_universe = [t for t in COVERAGE_UNIVERSE if t not in NO_CALL_TICKERS]
+    covered = [t for t in callable_universe if t in calls]
+    missing = [t for t in callable_universe if t not in calls]
+    print(f'  [call notes] {total} calls across {len(calls)} tickers  '
+          f'({len(covered)}/{len(callable_universe)} of call-holding universe)')
+    print(f'               Q&A items {qa_total}  (missing page link: {qa_nopage})')
+    if missing:
+        print(f'               no notes yet: {", ".join(missing)}')
+    if NO_CALL_TICKERS:
+        print(f'               excluded (no earnings calls): {", ".join(sorted(NO_CALL_TICKERS))}')
+    if deck_flags:
+        print(f'               deck-sourced (re-rip transcript): {", ".join(sorted(set(deck_flags)))}')
+
+    # ripped-but-not-built: compare the ripper index against what is in earnings_calls.json
+    idx_path = os.path.join(TRANSCRIPTS_DIR, 'text', '_earnings_index.json')
+    if os.path.isfile(idx_path):
+        try:
+            idx = json.load(open(idx_path, encoding='utf-8'))
+            built = {(tk, c.get('period')) for tk, cc in calls.items() for c in cc}
+            unbuilt = set()
+            for r in idx:
+                tk, per = r.get('ticker'), r.get('period')
+                if not tk or tk == 'UNK' or per in (None, 'ND'):
+                    continue
+                if r.get('call_type') == 'special':
+                    continue
+                if r.get('flag') in ('NO_QA_STRUCTURE_LIKELY_DECK', 'IMAGE_ONLY_NO_OCR'):
+                    continue
+                if (tk, per) not in built:
+                    unbuilt.add(f'{tk} {per}')
+            if unbuilt:
+                print(f'               ripped, not yet built ({len(unbuilt)}): '
+                      + ', '.join(sorted(unbuilt)))
+        except Exception:
+            pass
+
+
+# ── Extended layer: RRA state regulatory database ─────────────────────────────
+
+def report_rra():
+    """Health-check rra_states.json: number of state profiles and any categories
+    still marked pending/placeholder (e.g. the large_load_tariff placeholders)."""
+    if not os.path.isfile(RRA_JSON):
+        print('  [RRA] rra_states.json not found — skipping')
+        return
+    try:
+        rra = json.load(open(RRA_JSON, encoding='utf-8'))
+    except Exception as e:
+        print(f'  [RRA] could not read rra_states.json: {e}')
+        return
+    states = {k: v for k, v in rra.items() if not k.startswith('_')}
+    placeholder_states = []
+    for st, prof in states.items():
+        try:
+            blob = json.dumps(prof, ensure_ascii=False).lower()
+        except Exception:
+            continue
+        if '\u23f3' in blob or '⏳' in blob or 'placeholder' in blob or '"pending"' in blob:
+            placeholder_states.append(st)
+    print(f'  [RRA] {len(states)} state profiles'
+          + (f'  ({len(placeholder_states)} with pending/placeholder categories)'
+             if placeholder_states else '  (all categories populated)'))
+
 
 def main():
     # ── Load existing capiq_export.json ──────────────────────────────────────
@@ -843,6 +1152,22 @@ def main():
         adv_ct = sum(1 for d in ma_deals if d.get('advisors'))
         print(f'         m&a         {len(ma_deals):2d} deals ({gen_ct} gen  {adv_ct} w/banks)')
 
+        # ── Credit sheets ────────────────────────────────────────────────────
+        cap_details, cur_ratings, cred_ratios, debt_analysis = [], [], {}, {}
+        if 'Capital Structure Details' in sheets:
+            cap_details  = extract_credit_details(wb['Capital Structure Details'])
+        if 'Current Ratings' in sheets:
+            cur_ratings  = extract_current_ratings(wb['Current Ratings'])
+        if 'Credit Ratios (x)' in sheets:
+            cred_ratios   = extract_credit_ratios(wb['Credit Ratios (x)'])
+        if 'Debt Analysis' in sheets:
+            debt_analysis = extract_debt_analysis(wb['Debt Analysis'])
+        companies[ticker]['capital_structure_details'] = cap_details
+        companies[ticker]['current_ratings']           = cur_ratings
+        companies[ticker]['credit_ratios']             = cred_ratios
+        companies[ticker]['debt_analysis']             = debt_analysis
+        print(f'         credit      {len(cap_details):2d} instruments  {len(cur_ratings):2d} ratings  {len(cred_ratios):2d} ratios')
+
         wb.close()
 
     # ── Write outputs ─────────────────────────────────────────────────────────
@@ -881,6 +1206,14 @@ def main():
         ma  = len(co.get('ma_history', []))
         ma_str = str(ma) if ma else '—'
         print(f'  {ticker:<6}  {pen:>7}  {pst:>5}  {srp_str:>8}  {mg:>4}  {bd:>5}  {ma_str:>5}')
+
+    # ── Extended data layers (RRA + call notes) ────────────────────────────────
+    print(f'\n{"─"*62}')
+    print('  Extended data layers')
+    print(f'{"─"*62}')
+    rip_transcripts()
+    report_call_notes()
+    report_rra()
 
     print(f'\n[✓] Done — {TODAY}')
     print('\nNext step:')
