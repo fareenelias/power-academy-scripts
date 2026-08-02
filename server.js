@@ -14,6 +14,7 @@ const https   = require('https');
 const fs      = require('fs');
 const path    = require('path');
 const url     = require('url');
+const zlib    = require('zlib');
 
 const PORT       = 3001;
 const DATA_DIR   = 'E:\\PowerAcademy\\data';
@@ -53,7 +54,60 @@ function readBody(req) {
   });
 }
 
-// ── Routes ─────────────────────────────────────────────────
+// ── Send JSON with gzip ────────────────────────────────────
+// Compresses large JSON payloads when the client accepts gzip. The local data
+// files (capiq_export ~2.4MB, broker_research, ferc_opco, earnings_calls, rra_states)
+// are the ones that drag over Tailscale; small responses skip compression.
+// CORS headers set earlier via cors(res) persist through writeHead.
+function sendJSON(req, res, status, body, extraHeaders = {}) {
+  const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+  const headers = { 'Content-Type': 'application/json', ...extraHeaders };
+  const accepts = req.headers['accept-encoding'] || '';
+  if (/\bgzip\b/.test(accepts) && Buffer.byteLength(bodyStr) > 1024) {
+    zlib.gzip(bodyStr, (err, gz) => {
+      if (err) { res.writeHead(status, headers); res.end(bodyStr); return; }
+      res.writeHead(status, { ...headers, 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+      res.end(gz);
+    });
+  } else {
+    res.writeHead(status, headers);
+    res.end(bodyStr);
+  }
+}
+
+// ── Cached static-file serving (gzip once, keyed by mtime) ─────────────────
+// The heavy data files (capiq_export ~2.4MB, broker_research, ferc_opco,
+// earnings_calls, rra_states, precedents) were being re-read from disk AND
+// re-gzipped on EVERY request — the latency you feel switching tabs over
+// Tailscale. This caches the raw + gzipped buffers per file and only rebuilds
+// when the file's mtime changes on disk, so regenerating a data file
+// (extract_all.py, split_broker_json.py, etc.) auto-invalidates the cache.
+const _fileCache = new Map(); // filePath -> { mtimeMs, raw:Buffer, gz:Buffer|null }
+function serveFile(req, res, filePath, notFoundMsg) {
+  let stat;
+  try { stat = fs.statSync(filePath); }
+  catch(e) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: notFoundMsg || 'Not found', path: filePath }));
+    return;
+  }
+  let entry = _fileCache.get(filePath);
+  if (!entry || entry.mtimeMs !== stat.mtimeMs) {
+    entry = { mtimeMs: stat.mtimeMs, raw: fs.readFileSync(filePath), gz: null };
+    _fileCache.set(filePath, entry);
+  }
+  const accepts = req.headers['accept-encoding'] || '';
+  if (/\bgzip\b/.test(accepts) && entry.raw.length > 1024) {
+    if (!entry.gz) entry.gz = zlib.gzipSync(entry.raw); // compress once, then cached
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+    res.end(entry.gz);
+  } else {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(entry.raw);
+  }
+}
+
+
 const server = http.createServer(async (req, res) => {
   cors(res);
 
@@ -118,8 +172,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const state = fs.readFileSync(STATE_FILE, 'utf8');
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ exists: true, state: JSON.parse(state) }));
+      sendJSON(req, res, 200, { exists: true, state: JSON.parse(state) });
       log('State loaded');
     } catch(e) {
       log(`State load error: ${e.message}`);
@@ -158,25 +211,13 @@ const server = http.createServer(async (req, res) => {
 
   // ── 4b. IOU data routes ──────────────────────────────────────────────────
   if (pathname === '/api/eia/iou_grouped.json') {
-    const filePath = path.join(DATA_DIR, 'iou_grouped.json');
-    if (fs.existsSync(filePath)) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(fs.readFileSync(filePath, 'utf8'));
-    } else {
-      res.writeHead(404); res.end(JSON.stringify({ error: 'Run build_iou_grouped.py first' }));
-    }
+    serveFile(req, res, path.join(DATA_DIR, 'iou_grouped.json'), 'Run build_iou_grouped.py first');
     return;
   }
 
   // ── 4c. IOU territories full map ──────────────────────────────────────────
   if (pathname === '/api/eia/iou_territories.geojson') {
-    const filePath = path.join(DATA_DIR, 'iou_territories.geojson');
-    if (fs.existsSync(filePath)) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(fs.readFileSync(filePath, 'utf8'));
-    } else {
-      res.writeHead(404); res.end(JSON.stringify({ error: 'Run build_iou_map.py first' }));
-    }
+    serveFile(req, res, path.join(DATA_DIR, 'iou_territories.geojson'), 'Run build_iou_map.py first');
     return;
   }
 
@@ -184,25 +225,13 @@ const server = http.createServer(async (req, res) => {
   if (pathname.startsWith('/api/eia/')) {
     const file = pathname.replace('/api/eia/', '');
     const filePath = path.join(DATA_DIR, file.replace(/\//g, path.sep));
-    if (fs.existsSync(filePath)) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(fs.readFileSync(filePath, 'utf8'));
-    } else {
-      res.writeHead(404); res.end(JSON.stringify({ error: 'Not found', path: filePath }));
-    }
+    serveFile(req, res, filePath, 'Not found');
     return;
   }
 
   // ── Market data (generated by fetch_market_data.py) ──
   if (pathname === '/api/market-data') {
-    const filePath = path.join(DATA_DIR, 'market_data.json');
-    if (fs.existsSync(filePath)) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(fs.readFileSync(filePath, 'utf8'));
-    } else {
-      res.writeHead(404);
-      res.end(JSON.stringify({ error: 'market_data.json not found. Run fetch_market_data.py first.' }));
-    }
+    serveFile(req, res, path.join(DATA_DIR, 'market_data.json'), 'market_data.json not found. Run fetch_market_data.py first.');
     return;
   }
 
@@ -222,8 +251,7 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: `No market data for ${ticker}` }));
         return;
       }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ...co, generated: data.generated }));
+      sendJSON(req, res, 200, { ...co, generated: data.generated });
     } catch(e) {
       res.writeHead(500);
       res.end(JSON.stringify({ error: e.message }));
@@ -233,14 +261,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── CapIQ data ─────────────────────────────────────────
   if (pathname === '/api/capiq') {
-    const filePath = path.join(DATA_DIR, 'capiq_export.json');
-    if (fs.existsSync(filePath)) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(fs.readFileSync(filePath, 'utf8'));
-    } else {
-      res.writeHead(404);
-      res.end(JSON.stringify({ error: 'capiq_export.json not found.' }));
-    }
+    serveFile(req, res, path.join(DATA_DIR, 'capiq_export.json'), 'capiq_export.json not found.');
     return;
   }
 

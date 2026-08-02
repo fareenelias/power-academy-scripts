@@ -13,13 +13,8 @@ Derived metrics (all computed here, not sourced from FMP ratios):
   - eps_fy1 / fy1_label  : capiq eps_diluted[5] / periods[5]  (2027FY E)
   - eps_fy2 / fy2_label  : capiq eps_diluted[6] / periods[6]  (2028FY E)
   - pe_fy / pe_fy1 / pe_fy2 : price / eps (None if eps <= 0 or missing)
-  - div_per_share    : dividends_ps at the FORWARD-FY index (4), matching eps_fy.
-                       A CapIQ "NA" there means no dividend and is respected — it is
-                       NOT backfilled from an earlier year (that showed HE an 8.4%
-                       yield and XIFR 22.8% on a suspended distribution).
-  - div_per_share_ltm: the last dividend actually paid, kept for history only
-  - dividend_status  : 'current' | a plain-language note that the dividend stopped
-  - div_yield_pct    : div_per_share / price * 100 — None when there is no dividend
+  - div_per_share    : dividends_ps[-1] from capiq (most recent annual)
+  - div_yield_pct    : div_per_share / price * 100
   - payout_pct       : div_per_share / eps_fy * 100
   - rate_base_b      : best available (rate case opco sum → NUP fallback)
   - rate_base_label  : source disclosure string
@@ -265,38 +260,10 @@ for ticker, co in companies.items():
     pe_fy1 = safe_div(price, eps_fy1, decimals=1)
     pe_fy2 = safe_div(price, eps_fy2, decimals=1)
 
-    # ── Dividends ─────────────────────────────────────────────────────────────
-    # This used to strip every "NA" out of dividends_ps and take the last number
-    # left. But "NA" in the CURRENT period is CapIQ stating there is no dividend,
-    # and dropping it silently reached back to whichever earlier year still had
-    # one. Two names were being shown a dividend they no longer pay:
-    #   HE   [1.36, 1.4, 1.08, "NA", "NA"]                -> 1.08, an 8.36% yield
-    #   XIFR [2.693, 3.095, 3.444, 2.715, "NA"]           -> 2.715, a 22.82% yield
-    # XPLR suspended its distribution outright; both those figures are history
-    # presented as current, which is the kind of number that is embarrassing to
-    # quote out loud.
-    #
-    # dividends_ps is index-aligned to `periods`, exactly like eps_diluted, so the
-    # forward-FY dividend is index 4 — the SAME index eps_fy already uses. Reading
-    # it there also makes the yield and the P/E refer to the same period, which
-    # they previously did not.
+    # Dividends (most recent annual from capiq)
     divs = co.get("dividends_ps", [])
-    divs = divs if isinstance(divs, list) else []
-    div_per_share = safe_val(divs[4]) if len(divs) > 4 else None
-
-    # The trailing figure is real information and is kept — just not as the
-    # current dividend. `dividend_status` says plainly which case a name is in.
-    div_hist = [x for x in divs if isinstance(x, (int, float))]
-    div_per_share_ltm = div_hist[-1] if div_hist else None
-    if div_per_share is not None:
-        dividend_status = "current"
-    elif div_per_share_ltm is not None:
-        dividend_status = ("NO DIVIDEND in the forecast period per CapIQ (%s reads NA). "
-                           "Last paid %.4f. Yield deliberately not computed — an old "
-                           "dividend over today's price is not a yield."
-                           % (fy_label or "current FY", div_per_share_ltm))
-    else:
-        dividend_status = "never paid / not covered"
+    div_vals = [x for x in (divs if isinstance(divs, list) else []) if isinstance(x, (int, float))]
+    div_per_share = div_vals[-1] if div_vals else None
 
     # Div yield and payout
     div_yield_pct  = safe_div(div_per_share, price,  scale=100, decimals=2)
@@ -348,11 +315,9 @@ for ticker, co in companies.items():
         "pe_fy2": pe_fy2,
 
         # Dividend
-        "div_per_share":      div_per_share,
-        "div_per_share_ltm":  div_per_share_ltm,
-        "dividend_status":    dividend_status,
-        "div_yield_pct":      div_yield_pct,
-        "payout_pct":         payout_pct,
+        "div_per_share":  div_per_share,
+        "div_yield_pct":  div_yield_pct,
+        "payout_pct":     payout_pct,
     }
 
 # ---------------------------------------------------------------------------
@@ -380,12 +345,7 @@ for ticker, d in output["companies"].items():
         f"{fmt(d['fv_rate_base_x'], '5.2f', 'x'):>6} "
         f"{fmt(d['pe_fy'],          '5.1f', 'x'):>6} "
         f"{fmt(d['div_yield_pct'],  '5.2f', '%'):>6} "
-        # The record carries rate_base_opco_source (rate-case level) and consol_source
-        # (the consolidated figure actually used for FV/RB); there has never been a
-        # bare 'rate_base_source' key, so this line raised KeyError on the FIRST row
-        # of the summary table. Note the JSON is already written by this point, so the
-        # crash was cosmetic - it never cost a run. Fixed 2026-07-31.
-        f"  {d.get('consol_source') or d.get('rate_base_opco_source') or 'ND'}"
+        f"  {d['rate_base_source']}"
     )
 
 print(f"\nDone. Generated: {output['generated']}")

@@ -50,28 +50,17 @@ TODAY         = datetime.now().strftime('%m-%d-%Y')
 EARNINGS_JSON   = r'E:\PowerAcademy\data\earnings_calls.json'
 RRA_JSON        = r'E:\PowerAcademy\data\rra_states.json'
 TRANSCRIPTS_DIR = r'E:\PowerAcademy\Documents\transcripts'
-# Single consolidated text output dir. rip.py DEFAULTS to a per-folder
-# <Quarter Folder>\text\, which fragments output and hides it from the health
-# check below (which reads only this root path) — so --out is always passed.
-TRANSCRIPTS_TEXT = r'E:\PowerAcademy\Documents\transcripts\text'
-# rip.py replaced rip_earnings.py on 2026-07-18. This constant was never
-# repointed, so the retired ripper kept running: it resolves ticker/period from
-# the FILENAME, and S&P filenames carry neither, which is what produced
-# UNK_FY-2026.txt. rip.py reads the cover page instead.
-RIP_SCRIPT      = r'E:\PowerAcademy\scripts\rip.py'
+RIP_SCRIPT      = r'E:\PowerAcademy\scripts\rip_earnings.py'
 
 # 23-name coverage universe (for call-notes coverage reporting)
 COVERAGE_UNIVERSE = [
     'NEE','D','ETR','CMS','PPL','AEE','POR','EIX','PCG','HE','EVRG','ES','VST','TLN','XIFR',
-    'AWR','CWT','YORW','GWRS','AWK','WTRG','HTO','MSEX','AQN',
+    'AWR','CWT','YORW','GWRS','AWK','WTRG','HTO','MSEX',
 ]
 
 # Tickers that do NOT hold earnings calls (small water utilities) - excluded from
 # call-notes coverage gaps rather than flagged as missing.
 NO_CALL_TICKERS = {'YORW', 'MSEX'}
-# AQN DOES hold earnings calls and is deliberately NOT excluded here. It joined the
-# universe on 2026-07-31 with no transcripts on file, so it will show as a genuine
-# coverage gap until one is ripped -- which is the correct signal, not a bug.
 
 
 def parse_ticker_filter():
@@ -967,12 +956,7 @@ def rip_transcripts():
     import subprocess, sys
     print(f'  [call notes] ripping new/changed transcripts under {TRANSCRIPTS_DIR} ...')
     try:
-        # -r is MANDATORY: the PDFs live in per-quarter subfolders and rip.py is
-        # NOT recursive by default, so a bare folder arg rips ZERO files silently.
-        # --out keeps every .txt and the single _earnings_index.json in one place,
-        # which is where report_call_notes() looks.
-        subprocess.run([sys.executable, RIP_SCRIPT, TRANSCRIPTS_DIR,
-                        '-r', '--out', TRANSCRIPTS_TEXT], check=False)
+        subprocess.run([sys.executable, RIP_SCRIPT, TRANSCRIPTS_DIR], check=False)
     except Exception as e:
         print(f'  [call notes] rip step failed: {e}')
 
@@ -1015,7 +999,7 @@ def report_call_notes():
         print(f'               deck-sourced (re-rip transcript): {", ".join(sorted(set(deck_flags)))}')
 
     # ripped-but-not-built: compare the ripper index against what is in earnings_calls.json
-    idx_path = os.path.join(TRANSCRIPTS_TEXT, '_earnings_index.json')
+    idx_path = os.path.join(TRANSCRIPTS_DIR, 'text', '_earnings_index.json')
     if os.path.isfile(idx_path):
         try:
             idx = json.load(open(idx_path, encoding='utf-8'))

@@ -63,15 +63,12 @@ RIP_SCRIPT      = r'E:\PowerAcademy\scripts\rip.py'
 # 23-name coverage universe (for call-notes coverage reporting)
 COVERAGE_UNIVERSE = [
     'NEE','D','ETR','CMS','PPL','AEE','POR','EIX','PCG','HE','EVRG','ES','VST','TLN','XIFR',
-    'AWR','CWT','YORW','GWRS','AWK','WTRG','HTO','MSEX','AQN',
+    'AWR','CWT','YORW','GWRS','AWK','WTRG','HTO','MSEX',
 ]
 
 # Tickers that do NOT hold earnings calls (small water utilities) - excluded from
 # call-notes coverage gaps rather than flagged as missing.
 NO_CALL_TICKERS = {'YORW', 'MSEX'}
-# AQN DOES hold earnings calls and is deliberately NOT excluded here. It joined the
-# universe on 2026-07-31 with no transcripts on file, so it will show as a genuine
-# coverage gap until one is ripped -- which is the correct signal, not a bug.
 
 
 def parse_ticker_filter():

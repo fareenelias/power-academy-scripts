@@ -121,7 +121,6 @@ NAME_TICKER = {
     "ppl":"PPL","american states water":"AWR","california water":"CWT",
     "york water":"YORW","global water":"GWRS","american water":"AWK",
     "essential utilities":"WTRG","h2o america":"HTO","sjw":"HTO","middlesex":"MSEX",
-    "algonquin":"AQN","liberty utilities":"AQN","empire district":"AQN",
 }
 def ticker_from_name(fn):
     low = fn.lower().replace("_"," ").replace(","," ")
@@ -140,7 +139,7 @@ def ticker_from_name(fn):
 # cover fixes both. Filename resolution is kept as the fallback.
 COVERAGE_TICKERS = {
     'NEE','D','ETR','CMS','PPL','AEE','POR','EIX','PCG','HE','EVRG','ES','VST','TLN','XIFR',
-    'AWR','CWT','YORW','GWRS','AWK','WTRG','HTO','MSEX','AQN',
+    'AWR','CWT','YORW','GWRS','AWK','WTRG','HTO','MSEX',
 }
 EXCHANGE_TICKER_RE = re.compile(
     r'\b(?:NYSE(?:ARCA|AMERICAN|MKT)?|NASDAQ(?:GS|GM|CM)?|OTCPK|OTC|TSX|AMEX)\s*:\s*([A-Z]{1,5})\b')
