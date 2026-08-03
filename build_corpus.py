@@ -58,8 +58,23 @@ DEFAULT_ROOTS = [
     # after that these two are normally empty.
     (os.path.join(ROOT, 'data', 'transcripts'),        None),
     (os.path.join(ROOT, 'data', 'presentations'),      None),
+    # Sell-side research downloaded straight into data\. 33 unique documents sat
+    # here unindexed until 2026-08-03 - sector work (PJM backstop, AI load, the NEE
+    # M&A target screen) that exists nowhere else in the corpus.
+    (os.path.join(ROOT, 'data', 'EquityResearch'),     'broker_report'),
+    # Investor-presentation decks filed outside Documents\presentations.
+    (os.path.join(ROOT, 'Documents', 'special_presentations'), None),
 ]
 LIBRARY_ROOT = (os.path.join(ROOT, 'Documents', 'library'), 'library')
+
+# Deliberately NOT indexed. data\Scans\ is the Epson's raw output: multi-document
+# bundles that are afterwards split into Documents\reports\. Verified 2026-08-03 by
+# 6-word shingle overlap - 78-91% of every bundle's pages already exist as individual
+# named reports, and the residue is OCR drift between the two passes, not missing
+# documents. Indexing the bundles would return every broker note twice, once under a
+# title like `Scans-20260729` carrying no ticker and no date. The stray guard below
+# knows about these so they are reported as staging, not as an accident.
+STAGING_DIRS = [os.path.join(ROOT, 'data', 'Scans')]
 
 # ── ticker resolution ────────────────────────────────────────────────────────
 # Coverage (24) + the peer names that appear in the presentation set. Longest key
@@ -128,7 +143,7 @@ def _tickers_from_prefix(name):
         break                      # only the LEADING run of tokens is a ticker list
     return out
 
-def tickers_from_name(name):
+def tickers_from_name(name, path=None):
     """All tickers named in a filename. Multi-company files are real and matter:
     `Dominion_Energy,_Inc.,_NextEra_Energy,_Inc._-_MAndA_Call` is the live megadeal,
     and it belongs under BOTH names."""
@@ -151,6 +166,13 @@ def tickers_from_name(name):
         t = NAME_TICKER[k]
         if t not in hits:
             hits.append(t)
+    if not hits and path:
+        # `data\EquityResearch\GWRS\Document_20260305_0001.pdf` - the ticker is the
+        # FOLDER, not the filename. Fallback only: it can never override a real hit.
+        segs = os.path.dirname(str(path)).replace('\\', '/').split('/')[-2:]
+        for seg in reversed(segs):
+            if seg.upper() in KNOWN:
+                return [seg.upper()]
     return hits
 
 # ── date / period ────────────────────────────────────────────────────────────
@@ -267,10 +289,14 @@ def url_for(path):
     docs = os.path.join(ROOT, 'Documents').replace('\\', '/').rstrip('/') + '/'
     data = os.path.join(ROOT, 'data').replace('\\', '/').rstrip('/') + '/'
     lp = p.lower()
+    # The research filenames carry spaces and en-dashes ("NARUC 2026 Takes - ...").
+    # An unencoded href breaks on those; quote() leaves '/' alone so the path shape
+    # is unchanged and Caddy decodes the rest.
+    from urllib.parse import quote
     if lp.startswith(docs.lower()):
-        return CADDY + '/' + p[len(docs):]
+        return CADDY + '/' + quote(p[len(docs):])
     if lp.startswith(data.lower()):
-        return CADDY + '/corpus/' + p[len(data):]
+        return CADDY + '/corpus/' + quote(p[len(data):])
     return None
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -300,12 +326,52 @@ def main():
             continue
         n = 0
         for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = [d for d in dirnames if d.lower() not in ('text', '_to_delete', '_archive')]
+            dirnames[:] = [d for d in dirnames
+                           if d.lower() not in ('text', '_archive')
+                           and not d.lower().startswith('_to_delete')]
+            # A `Credit Reports\` subfolder inside a research root holds credit, not
+            # equity research. data\EquityResearch\ETR\ splits exactly that way, so
+            # the hint has to be per DIRECTORY, not per root.
+            leaf  = os.path.basename(dirpath.rstrip('\\/')).lower()
+            dhint = 'credit' if 'credit' in leaf else hint
             for fn in filenames:
                 if fn.lower().endswith('.pdf'):
-                    found.append((os.path.join(dirpath, fn), hint)); n += 1
+                    found.append((os.path.join(dirpath, fn), dhint)); n += 1
         print(f'  {n:>5} pdf under {base}')
     print(f'  {len(found)} pdf paths total')
+
+    # Stray guard. Two folders - Documents\special_presentations and
+    # data\EquityResearch - sat outside every root for weeks: filed, backed up, and
+    # invisible to search, with nothing anywhere indicating a gap. Walking only the
+    # roots it is told about cannot ever surface that. Walk the whole tree instead
+    # and name what is not covered.
+    covered = {os.path.normcase(os.path.abspath(p)) for p, _ in found}
+    strays = []
+    for tree in (os.path.join(ROOT, 'Documents'), os.path.join(ROOT, 'data')):
+        if not os.path.isdir(tree):
+            continue
+        for dirpath, dirnames, filenames in os.walk(tree):
+            dirnames[:] = [d for d in dirnames
+                           if d.lower() not in ('text', '_archive', 'corpus')
+                           and not d.lower().startswith('_to_delete')
+                           and not (d.lower() == 'library' and not args.include_library)]
+            for fn in filenames:
+                if fn.lower().endswith('.pdf'):
+                    q = os.path.join(dirpath, fn)
+                    if os.path.normcase(os.path.abspath(q)) not in covered:
+                        strays.append(q)
+    _stag = [os.path.normcase(os.path.abspath(d)) for d in STAGING_DIRS]
+    known  = [p for p in strays if any(os.path.normcase(os.path.abspath(p)).startswith(d) for d in _stag)]
+    unknown = [p for p in strays if p not in known]
+    if known:
+        print(f'  ({len(known)} PDF(s) under known staging - deliberately not indexed)')
+    if unknown:
+        from collections import Counter as _C
+        print(f'  !! {len(unknown)} PDF(s) sit OUTSIDE every indexed root - not searchable:')
+        for d, c in sorted(_C(os.path.dirname(p) for p in unknown).items()):
+            print(f'       {c:>5}  {d}')
+        print('     Add the folder to DEFAULT_ROOTS, move the files under one, or')
+        print('     add it to STAGING_DIRS if it is raw input that should stay out.')
 
     # 2. hash -> dedupe. Cross-folder copies collapse here.
     by_hash = {}
@@ -351,7 +417,7 @@ def main():
             errors.append((primary, str(e)));  continue
 
         dtype, wpp = classify(text, pages, words, rec['hint'], stem)
-        tk = tickers_from_name(stem)
+        tk = tickers_from_name(stem, primary)
         flags = []
         if wpp < 20:
             flags.append('NO_TEXT_LAYER: %d words over %d pages - image-only, and no rip.py OCR text '
@@ -386,8 +452,9 @@ def main():
                                  r['date'] or '', r['title']))
     out = {
         '_generated': __import__('datetime').datetime.now().isoformat(timespec='seconds'),
-        '_note': ('Unique documents across Documents\\{reports,credit,transcripts} and '
-                  'data\\{transcripts,presentations}. Deduped by CONTENT HASH because the '
+        '_note': ('Unique documents across Documents\\{reports,credit,transcripts,'
+                  'presentations,special_presentations} and data\\{transcripts,presentations,'
+                  'EquityResearch}. Deduped by CONTENT HASH because the '
                   'source folders are cross-contaminated and the same call exists under two '
                   'naming conventions. doc_type is classified from the text, not the folder.'),
         '_counts': {},
