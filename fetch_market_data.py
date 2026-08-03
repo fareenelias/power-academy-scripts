@@ -73,7 +73,11 @@ ip_data = {}
 if os.path.exists(ip_path):
     with open(ip_path, "r", encoding="utf-8") as f:
         raw = json.load(f)
-    ip_data = raw.get("companies", raw)
+    # 2026-08-02: rate_base_ip.json used to carry BOTH a top-level ticker map (read by the
+    # dashboard) and a stale `companies` block of 12 names that disagreed with it (read here).
+    # One file, two answers - which is why fv_rate_base_x diverged from the Opcos & Rate Base
+    # panel. The dead block is gone; this now reads the same top-level map the dashboard reads.
+    ip_data = raw.get("companies") or {k: v for k, v in raw.items() if not k.startswith("_")}
     print(f"Loaded IP rate base for {len(ip_data)} companies from rate_base_ip.json")
 else:
     print(f"Note: rate_base_ip.json not found at {ip_path} — using NUP fallback for all companies")
@@ -157,8 +161,11 @@ def get_rate_base(co, ip_entry=None):
 
     # Consolidated rate base for FV/RB multiple:
     # Priority: (1) IP-disclosed, (2) NUP balance sheet, (3) net_ppe
-    if ip_entry and ip_entry.get("rate_base_b"):
-        consolidated_rb_b = ip_entry["rate_base_b"]
+    # `rate_base_b` was the old `companies`-block key; `consolidated_b` is the top-level one.
+    # Accept either, so this works before and after the block removal.
+    ip_rb = (ip_entry or {}).get("rate_base_b") or (ip_entry or {}).get("consolidated_b")
+    if ip_entry and ip_rb:
+        consolidated_rb_b = ip_rb
         consol_label = f"IP-Disclosed: {ip_entry.get('label','')} ({ip_entry.get('year','')})"
         consol_source = "investor_presentation"
     else:
