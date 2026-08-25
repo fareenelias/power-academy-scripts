@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""extract_infralogic.py — Infralogic Funds-Export workbooks -> two JSONs.
+r"""extract_infralogic.py — Infralogic Funds-Export workbooks -> two JSONs.
 
   data\infralogic\*Infralogic-Funds-Export*.xlsx
       -> data\infralogic_funds.json   (GP -> funds: vintage, status, size, IRR,
@@ -24,10 +24,8 @@ Rules honoured:
     infralogic_*.json. Never touches the coverage JSONs.
   * atomic writes; provenance (_files, per-row source file) carried.
 
-Usage:
-  python extract_infralogic.py --src E:\\PowerAcademy\\data\\infralogic ^
-      --out-funds E:\\PowerAcademy\\data\\infralogic_funds.json ^
-      --out-assets E:\\PowerAcademy\\data\\infralogic_assets.json
+Usage (PowerShell — one line; `^` is cmd-only and backtick is the PS continuation):
+  python E:\PowerAcademy\scripts\extract_infralogic.py --src E:\PowerAcademy\data\infralogic --out-funds E:\PowerAcademy\data\infralogic_funds.json --out-assets E:\PowerAcademy\data\infralogic_assets.json
 """
 import argparse, glob, json, os, re, sys, tempfile
 from datetime import date

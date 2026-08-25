@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""build_sponsor_universe.py — seed data\sponsor_universe.json from precedents.json.
+r"""build_sponsor_universe.py — seed data\sponsor_universe.json from precedents.json.
 
 Financial-sponsor layer for the Origination screen: who buys regulated assets, what
 they hold, how long they've held it. Seeded ENTIRELY from precedents.json — no new
 data source needed. Inframation/Infralogic fields are declared with _missing reasons
 and filled by a later enrichment pass when exports exist.
 
-Usage:
-    python build_sponsor_universe.py --precedents E:\\PowerAcademy\\data\\precedents.json ^
-        --out E:\\PowerAcademy\\data\\sponsor_universe.json [--as-of 2026-08-19]
+Usage (PowerShell — one line; `^` is cmd-only and backtick is the PS continuation):
+    python E:\PowerAcademy\scripts\build_sponsor_universe.py --precedents E:\PowerAcademy\data\precedents.json --out E:\PowerAcademy\data\sponsor_universe.json --infralogic-funds E:\PowerAcademy\data\infralogic_funds.json --infralogic-assets E:\PowerAcademy\data\infralogic_assets.json
 
 Rules honoured (from the tracker):
   * merge-safe: atomic write; if --out exists, hand-entered `inframation` blocks and
