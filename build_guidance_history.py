@@ -794,6 +794,87 @@ def plan_drift(tobj):
     return out
 
 
+def algo_drift(tobj):
+    """Guidance item 5 (2026-09-21): long-term algorithm drift. The stated LT EPS
+    growth range and rate-base CAGR, collapsed to change points - a move in the
+    LT algorithm (6-8% -> 8-10%) is a re-rating catalyst with a date attached,
+    and until now each move was a single number buried in one deck. Only PRINTED
+    statements enter; a vintage where the deck states nothing is SKIPPED
+    (silence is not a change), so a run's last_stated is the last deck that
+    actually printed the value."""
+    per = sorted([k for k in tobj if not k.startswith('_')], key=pkey_sort)
+
+    def collapse(rows, same, direction):
+        runs = []
+        for row in rows:
+            if runs and same(runs[-1], row):
+                runs[-1]['last_stated'] = row['period']
+                runs[-1]['n_statements'] += 1
+            else:
+                r = dict(row)
+                r['first_stated'] = r.pop('period')
+                r['last_stated'] = r['first_stated']
+                r['n_statements'] = 1
+                runs.append(r)
+        moves = []
+        for a, b in zip(runs, runs[1:]):
+            moves.append({'at': b['first_stated'], 'from': {k: a.get(k) for k in ('low', 'high', 'rate_pct', 'window') if k in a},
+                          'to': {k: b.get(k) for k in ('low', 'high', 'rate_pct', 'window') if k in b},
+                          'direction': direction(a, b),
+                          'source_page': b.get('source_page'), 'source_url': b.get('source_url')})
+        return {'runs': runs, 'moves': moves}
+
+    eps_rows = []
+    for p in per:
+        g = tobj[p].get('lt_eps_growth') or {}
+        if g.get('rate_low_pct') is None and g.get('rate_high_pct') is None:
+            continue
+        eps_rows.append({'period': p, 'low': g.get('rate_low_pct'), 'high': g.get('rate_high_pct'),
+                         'basis': g.get('basis'), 'source_page': g.get('source_page'),
+                         'source_url': tobj[p].get('source_url')})
+
+    def eps_same(a, b):
+        return a['low'] == b['low'] and a['high'] == b['high']
+
+    def eps_dir(a, b):
+        al, ah = a['low'], a['high']
+        bl, bh = b['low'], b['high']
+        if None in (al, ah, bl, bh):
+            return 'changed'
+        if bl >= al and bh >= ah and (bl > al or bh > ah): return 'raised'
+        if bl <= al and bh <= ah and (bl < al or bh < ah): return 'lowered'
+        if bl > al and bh < ah: return 'narrowed'
+        if bl < al and bh > ah: return 'widened'
+        return 'changed'
+
+    rb_rows = []
+    for p in per:
+        g = tobj[p].get('rate_base_cagr') or {}
+        if g.get('rate_pct') is None:
+            continue
+        w = None
+        if g.get('from_year') and g.get('to_year'):
+            w = '%s-%s' % (g['from_year'], g['to_year'])
+        rb_rows.append({'period': p, 'rate_pct': g.get('rate_pct'), 'window': w,
+                        'basis': g.get('basis'), 'source_page': g.get('source_page'),
+                        'source_url': tobj[p].get('source_url')})
+
+    def rb_same(a, b):
+        return a['rate_pct'] == b['rate_pct']   # window roll-forward alone is not a move
+
+    def rb_dir(a, b):
+        if a['rate_pct'] is None or b['rate_pct'] is None: return 'changed'
+        return 'raised' if b['rate_pct'] > a['rate_pct'] else 'lowered'
+
+    return {'lt_eps_growth': collapse(eps_rows, eps_same, eps_dir),
+            'rate_base_cagr': collapse(rb_rows, rb_same, rb_dir),
+            'note': ('Runs collapse consecutive identical printed statements; moves are dated at the first '
+                     'deck printing the new value. rate_base_cagr windows roll forward routinely, so a '
+                     'window change with the same rate is NOT a move (the run row carries the first-stated '
+                     'window). EPS ranges and rate-base CAGRs are house-stated algorithms, not guidance '
+                     'levels - bases can differ vintage to vintage; the deep link is the arbiter.')}
+
+
 def consolidate_flags(flagged, repeat_at=4):
     """A review list that over-asks gets ignored wholesale. Capital-plan rows are
     always kept one-per-cell. A systematic slide-layout problem that repeats
@@ -864,6 +945,7 @@ def main():
                              'capital_plan_filled': filled,
                              'sparse': len(decks) < 14}
         tobj['_capital_plan_drift'] = drift
+        tobj['_lt_algo_drift'] = algo_drift(tobj)
         out[tk] = tobj
 
     out['_note'] = {

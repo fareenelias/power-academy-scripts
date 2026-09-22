@@ -232,6 +232,12 @@ def rip_transcript(path, folder, out_dir, used):
     d=fitz.open(path)
     raw="\n".join(f"\n[[PAGE {i+1}]]\n"+pg.get_text("text") for i,pg in enumerate(d))
     pages=d.page_count; flag="OK"
+    # NATIVE cover, captured BEFORE the OCR branch can replace raw. The incremental
+    # probe in main() reads doc[0].get_text() and can never see OCR text, so name
+    # resolution must prefer this same native text or probe and write diverge on
+    # partial-text transcripts (cover has a text layer, body forces OCR) and the
+    # PDF re-rips forever under a second name.
+    native_cover = raw[:3000]
     if len(raw.strip()) < 100*max(pages,1):
         ocr=_ocr_doc(d)
         if ocr and len(ocr.strip())>100*max(pages,1): raw=ocr; flag="OCR"
@@ -243,10 +249,11 @@ def rip_transcript(path, folder, out_dir, used):
         _secs=_split_sections(cleaned)
         if "presentation" not in _secs and "qa" not in _secs:
             flag="TRANSCRIPT_COVER_BUT_NO_QA_LIKELY_DECK"
-    _cover = raw[:3000]   # page 1: exchange tag + fiscal quarter (pre-_clean, to
-                          # match the cover text the incremental probe reads)
-    meta={"ticker":ticker_from_cover(_cover) or ticker_from_name(fn),
-          "period":period_from_cover(_cover) or period_from_name(fn),
+    # Cover resolution order: native page-1 text (what the probe reads) first, the
+    # OCR'd cover second (recovers scans the native text can't resolve), filename last.
+    _ocr_cover = raw[:3000] if flag == "OCR" else ""
+    meta={"ticker":ticker_from_cover(native_cover) or ticker_from_cover(_ocr_cover) or ticker_from_name(fn),
+          "period":period_from_cover(native_cover) or period_from_cover(_ocr_cover) or period_from_name(fn),
           "call_date":date_from_name(fn),
           "call_type":("special" if "special" in folder.lower() else "earnings"),
           "source_folder":folder,"source_file":fn,
@@ -452,6 +459,24 @@ def iter_pdfs(paths, recursive):
         else:
             print(f"  path not found: {p}")
 
+def find_rip_by_source(out_dir, src_fn):
+    """Fallback probe: locate an existing rip of this PDF by the 'source_file:' header
+    line. Covers the divergence the name-based probe cannot: a partial-text transcript
+    whose write path resolved ticker/period off OCR text the cheap probe never sees.
+    Only runs on a name-probe miss, so the O(dir) header scan is rare."""
+    try: names = os.listdir(out_dir)
+    except OSError: return None
+    needle = f"source_file: {src_fn}"
+    for n in names:
+        if not n.endswith(".txt"): continue
+        fp = os.path.join(out_dir, n)
+        try:
+            with open(fp, encoding="utf-8", errors="ignore") as fh:
+                head = fh.read(600)
+        except OSError: continue
+        if needle in head: return fp
+    return None
+
 def is_up_to_date(pdf_path, out_path):
     if not os.path.exists(out_path): return False
     if os.path.getsize(out_path) < MIN_VALID_BYTES: return False
@@ -532,8 +557,15 @@ def main():
         else:
             probe=os.path.join(out_dir, os.path.splitext(os.path.basename(pdf))[0]+".txt")
 
-        if not a.force and is_up_to_date(pdf, probe):
-            skipped+=1; continue
+        if not a.force:
+            if is_up_to_date(pdf, probe):
+                skipped+=1; continue
+            if dtype=="transcript":
+                # name-probe missed -- check whether an earlier rip of this exact PDF
+                # exists under a different resolved name before re-ripping it.
+                alt = find_rip_by_source(out_dir, os.path.basename(pdf))
+                if alt and is_up_to_date(pdf, alt):
+                    skipped+=1; continue
 
         try:
             if dtype=="transcript":
