@@ -579,27 +579,81 @@ def eps_guidance(tk, deck):  # noqa: C901
     return top[1]
 
 
-def lt_growth(tk, deck):
-    pid = deck['id']
-    rx = (r'(?P<lo>\d{1,2}(?:\.\d)?)\s*%\s*(?:' + DASH + r'|to|-)\s*(?P<hi>\d{1,2}(?:\.\d)?)\s*%[^.]{0,70}?'
-          r'(?:EPS|earnings per share|adjusted EPS)[^.]{0,30}?(?:CAGR|growth)')
-    rx2 = (r'(?:EPS|earnings per share)[^.]{0,40}?(?:CAGR|growth)[^.]{0,40}?(?P<lo>\d{1,2}(?:\.\d)?)\s*%'
+# LOAD-GROWTH COLLISION GUARD (2026-09-21b). The drift layer caught three POR cells
+# where this extractor stored a LOAD-growth range as the LT EPS algorithm: the old
+# gap class [^.]{0,70} let a load-growth range bridge across intervening percent
+# figures to a later "...EPS growth" anchor. Two changes, both proven by the
+# embedded controls below (real slide texts, incl. all three POR defects):
+#   1. the gap between the range and the EPS anchor may not contain another '%'
+#      ([^.%] instead of [^.]) - a bridge across a different figure is refused;
+#   2. the lookback before the range (truncated at the previous % figure) may not name a colliding metric (load
+#      growth / dividend / payout / rate base) - "load growth of 2.5% to 3.0%
+#      supporting EPS growth" is refused even with a clean gap.
+# A refused match is SKIPPED, not fatal - scanning continues, so the slide's real
+# algorithm range (which has a clean gap) still lands.
+_LT_COLLIDE = re.compile(r'load\s+growth|dividend|payout|rate\s+base', re.I)
+
+def lt_growth_scan(fb):
+    """Per-text LT-EPS-growth scan; module-level so the controls can run on strings."""
+    rx = (r'(?P<lo>\d{1,2}(?:\.\d)?)\s*%\s*(?:' + DASH + r'|to|-)\s*(?P<hi>\d{1,2}(?:\.\d)?)\s*%[^.%]{0,70}?'
+          r'(?:EPS|earnings per share|adjusted EPS)[^.%]{0,30}?(?:CAGR|growth)')
+    rx2 = (r'(?:EPS|earnings per share)[^.%]{0,40}?(?:CAGR|growth)[^.%]{0,40}?(?P<lo>\d{1,2}(?:\.\d)?)\s*%'
            r'\s*(?:' + DASH + r'|to|-)\s*(?P<hi>\d{1,2}(?:\.\d)?)\s*%')
     for r_ in (rx, rx2):
-        for pno, body in pages(pid):
-            fb = flat(body)
-            for m in re.finditer(r_, fb, re.I):
-                lo, hi = float(m.group('lo')), float(m.group('hi'))
-                if not (0 < lo < hi <= 20): continue
-                seg = fb[max(0, m.start() - 140): m.end() + 160]
-                by = re.search(r'(?:off|from|using|base(?:d)? (?:off|on)|vs\.?)[^.]{0,60}?(20\d\d)', seg)
-                thru = re.search(r'through (?:at least )?(20\d\d)', seg)
-                return {'rate_low_pct': lo, 'rate_high_pct': hi,
-                        'base_year': by.group(1) if by else None,
-                        'through_year': thru.group(1) if thru else None,
-                        'basis': 'printed', 'page': pno,
-                        'text': fb[max(0, m.start() - 120): m.end() + 120]}
+        for m in re.finditer(r_, fb, re.I):
+            lo, hi = float(m.group('lo')), float(m.group('hi'))
+            if not (0 < lo < hi <= 20): continue
+            pre = fb[max(0, m.start('lo') - 45): m.start('lo')]
+            # A '%' between the collide word and our range means the collide word
+            # governs THAT earlier figure, not ours - truncate the lookback there
+            # (found by control 2: 'load growth of 2.5% to 3.0% Re-affirming 4% to
+            # 6% ... EPS growth' must keep its true 4-6 match).
+            cut = pre.rfind('%')
+            if cut >= 0: pre = pre[cut + 1:]
+            if _LT_COLLIDE.search(pre): continue
+            seg = fb[max(0, m.start() - 140): m.end() + 160]
+            by = re.search(r'(?:off|from|using|base(?:d)? (?:off|on)|vs\.?)[^.]{0,60}?(20\d\d)', seg)
+            thru = re.search(r'through (?:at least )?(20\d\d)', seg)
+            return {'rate_low_pct': lo, 'rate_high_pct': hi,
+                    'base_year': by.group(1) if by else None,
+                    'through_year': thru.group(1) if thru else None,
+                    'basis': 'printed',
+                    'text': fb[max(0, m.start() - 120): m.end() + 120]}
     return None
+
+def lt_growth(tk, deck):
+    pid = deck['id']
+    for pno, body in pages(pid):
+        r = lt_growth_scan(flat(body))
+        if r:
+            r['page'] = pno
+            return r
+    return None
+
+# Embedded controls - REAL slide texts. The three POR defects must resolve to the
+# printed algorithm (or nothing), never to the load-growth range; the true
+# positives must keep extracting. Runs at import; a failure refuses the build.
+_LT_CONTROLS = [
+    # (text, expected (lo,hi) or None-means-must-not-equal-forbidden)
+    ("dance to $2.70 to $2.85 per diluted share from $2.55 to $2.70 per diluted share \u2022 2021 load growth to 2.5% to 3.0% from 1% to 1.5% Reaffirming \u2022 4% to 6% long-term EPS growth, 2019 base year \u2022 5% to 7% long-term dividend growth", (4.0, 6.0)),
+    ("challenging power markets High-tech and digital growth + Sustained residential demand Re-affirming 2021 load growth of 2.5% to 3.0% Re-affirming 4% to 6% long-term EPS growth Re-affirming full year 2021 EPS guidance of $2.70 to $2.85 per diluted share", (4.0, 6.0)),
+    ("rming \u2022 2026 adjusted earnings guidance of $3.33 to $3.53 per diluted share \u2022 2026 weather normalized load growth of 1.5% - 2.5% and long-term load growth of 3% through 2030 \u2022 Long-term EPS growth of 5% to 7% from 2024 adjusted EPS guidance midpoint", (5.0, 7.0)),
+    ("load growth of 2.5% to 3.0% supporting EPS growth over the plan", None),
+    ("Strong 5% to 7% adjusted EPS growth Expect dividend growth rate in line with EPS growth", (5.0, 7.0)),
+    ("Expect 6% to 8% EPS CAGR from 2021-2025 Using 2021 EPS guidance midpoint", (6.0, 8.0)),
+    ("Reaffirming adjusted EPS growth target of 4% to 6% through 2026 off the original 2023 adjusted EPS guidance midpoint of $3.65", (4.0, 6.0)),
+]
+
+def _run_lt_controls():
+    for txt, want in _LT_CONTROLS:
+        got = lt_growth_scan(txt)
+        pair = (got['rate_low_pct'], got['rate_high_pct']) if got else None
+        if want is None:
+            assert pair is None, 'LT CONTROL FAILED (should refuse): %r -> %r' % (txt[:60], pair)
+        else:
+            assert pair == want, 'LT CONTROL FAILED: %r -> %r, want %r' % (txt[:60], pair, want)
+
+_run_lt_controls()
 
 def rate_base(tk, deck):
     pid = deck['id']
