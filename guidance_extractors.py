@@ -203,6 +203,48 @@ def equity_from_text(fb):
     return None, None, None, None
 
 
+# ================================================================ DEBT =======
+# Built 2026-09-21 for the §4.3 denominator. Real slide forms:
+#   AWK funding-plan tables:  "Debt Financing $11,800  Equity Issuances $2,500"  ($M)
+#   AWK 2024-2028 plan:       "Incremental Debt Financing $7,000"
+#   Sentence form:            "$X billion of (incremental) debt financing"
+# Hazards guarded: maturities schedules ("Debt Issuances and Maturities" slides),
+# bridge-slide deltas ("+$500"), executed/past issuance, refinancing/repayment,
+# ranges. Millions-table values are converted /1000 with the conversion stated.
+DEBT_LABEL_M = re.compile(r'(?i)(?:incremental\s+)?debt financing\s*\$\s?(\d{1,3},\d{3})(?!\d)')
+DEBT_LABEL_B = re.compile(r'(?i)(?:incremental\s+)?debt financing[^.$]{0,40}?' + _BV)
+DEBT_VAL_B   = re.compile(_BV + r'\s+of\s+(?:incremental\s+)?debt (?:financing|issuances?)', re.I)
+
+DEBT_BAD_CTX = re.compile(r'(?i)maturit|repaid|repay|refinanc|redeem|\bissued\b|\bcompleted\b'
+                          r'|already executed')
+_DEBT_BAND = (0.2, 60.0)
+
+
+def debt_from_text(fb):
+    """(debt_b, window, evidence) or (None, None, None) for one flattened page."""
+    for rx, is_millions in ((DEBT_LABEL_M, True), (DEBT_LABEL_B, False), (DEBT_VAL_B, False)):
+        for m in rx.finditer(fb):
+            ctx = fb[max(0, m.start() - 60):m.end() + 40]
+            if DEBT_BAD_CTX.search(ctx):
+                continue
+            if EQ_RANGE.match(fb[m.end(1):m.end(1) + 14]):
+                continue
+            v = float(m.group(1).replace(',', ''))
+            if is_millions:
+                v = round(v / 1000.0, 3)
+            if not (_DEBT_BAND[0] <= v <= _DEBT_BAND[1]):
+                continue
+            wm = EQ_WINDOW.search(fb[max(0, m.start() - 100):m.end() + 95])
+            window = '%s-%s' % (wm.group(1), wm.group(2)) if wm else None
+            ev = fb[max(0, m.start() - 70):m.end() + 70]
+            if is_millions:
+                ev = '[$M table value %s converted to $%gB] ' % (m.group(1), v) + ev
+            if window:
+                ev = '[%s plan] ' % window + ev
+            return v, window, ev
+    return None, None, None
+
+
 _KIND_CAVEAT = {
     'atm_program_capacity': '[ATM PROGRAM CAPACITY, not a windowed plan total] ',
     'atm_program_increase': '[ATM PROGRAM INCREASE, window unstated - not a plan-window total] ',
@@ -257,6 +299,19 @@ _EQ_MUST_REFUSE = [
     "2024 Equity Issuances $1.0B completed under the program",                                     # E1 hist, $B form
     "our equity needs - Credit agreements of $2.6 billion in place through Dec. 2028",             # E3 without ATM prefix
 ]
+_DEBT_MUST_MATCH = [
+    ("$24,000 Debt Financing $11,800 Equity Issuances $2,500 Sale Proceeds (HOS)* $795 in 2026-2030", 11.8, '2026-2030'),
+    ("Incremental Debt Financing $7,000 Equity Issuance $1,000 Sale Proceeds (HOS) $720", 7.0, None),
+    ("$13,000 Debt Financing $10,500 Equity Issuances $2,500 in 2025-2029 plan", 10.5, '2025-2029'),
+    ("plan funded with $4.5 billion of incremental debt financing in the 2025-2029 plan", 4.5, '2025-2029'),
+]
+_DEBT_MUST_REFUSE = [
+    "2026 Parent Debt and Equity Issuances and Maturities - Debt Financing $1,200 of maturities refinanced",  # maturities/refi
+    "~50% Debt Financing +$500 $(400) Equity Issuance +$500",                                      # bridge deltas
+    "issued $2.3 billion of debt financing in 2024 at attractive rates",                           # executed
+    "debt financing $3,000 - $4,000 depending on market conditions",                               # range
+    "repaid $1.2 billion of debt financing during the year",                                       # repayment
+]
 
 
 def _run_controls():
@@ -281,10 +336,21 @@ def _run_controls():
         ok = (v is None)
         bad += not ok
         print('%s EQ  refuse        got %-6s | %s' % ('PASS' if ok else 'FAIL', v, txt[:60]))
+    for txt, want, window in _DEBT_MUST_MATCH:
+        v, w, ev = debt_from_text(txt)
+        ok = (v == want and w == window)
+        bad += not ok
+        print('%s DBT match  %-5s/%s got %s/%s | %s' % ('PASS' if ok else 'FAIL', want, window, v, w, txt[:52]))
+    for txt in _DEBT_MUST_REFUSE:
+        v, w, ev = debt_from_text(txt)
+        ok = (v is None)
+        bad += not ok
+        print('%s DBT refuse        got %-6s | %s' % ('PASS' if ok else 'FAIL', v, txt[:60]))
     print('---')
     if bad:
         sys.exit('%d CONTROL(S) FAILED' % bad)
-    print('all %d controls pass' % (len(_DIV_MUST_MATCH) + len(_DIV_MUST_REFUSE) + len(_EQ_MUST_MATCH) + len(_EQ_MUST_REFUSE)))
+    print('all %d controls pass' % (len(_DIV_MUST_MATCH) + len(_DIV_MUST_REFUSE) + len(_EQ_MUST_MATCH)
+                                    + len(_EQ_MUST_REFUSE) + len(_DEBT_MUST_MATCH) + len(_DEBT_MUST_REFUSE)))
 
 
 if __name__ == '__main__':

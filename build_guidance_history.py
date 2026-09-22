@@ -22,7 +22,8 @@ Usage:
 import argparse, json, os, re, sys, tempfile, collections
 # Hardened dividend + equity extractors (2026-09-21): 29 controls, 10 tamper-proven
 # guards, built from the QC sessions in which 10 of 61 workbook proposals were wrong.
-from guidance_extractors import dividend_from_text, equity_from_text, compose_equity_text
+from guidance_extractors import (dividend_from_text, equity_from_text, compose_equity_text,
+                                 debt_from_text)
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INDEX = os.path.join(BASE, 'guidance_index.json')
@@ -643,6 +644,17 @@ def equity_plan(tk, deck):
                     'text': compose_equity_text(kind, window, ev)}
     return None
 
+def debt_plan(tk, deck):
+    """Debt-financing plan figures (the §4.3 denominator's other half), added
+    2026-09-21 — debt_b was previously None BY CONSTRUCTION. Guards: maturities
+    schedules, bridge deltas, executed/refinanced/repaid, ranges. $M table
+    values are converted with the conversion stated in the text."""
+    for pno, body in pages(deck['id']):
+        v, window, ev = debt_from_text(flat(body))
+        if v is not None:
+            return {'debt_b': v, 'basis': 'printed', 'page': pno, 'text': ev}
+    return None
+
 # =================================================================== BUILD ====
 def build_row(tk, deck):
     row = {'source': deck['title'], 'source_date': deck['date'], 'source_id': deck['id'],
@@ -706,10 +718,17 @@ def build_row(tk, deck):
                                 if dv else {'current_annual': None, 'growth_rate_pct': None,
                                             'basis': None, 'note': 'not stated in this deck'})
     eq = equity_plan(tk, deck)
-    row['financing_plan'] = ({'equity_b': eq['equity_b'], 'debt_b': None, 'basis': 'printed',
-                              'source_page': eq['page'], 'note': flat(eq['text'])[:250]}
-                             if eq else {'equity_b': None, 'debt_b': None, 'basis': None,
-                                         'note': 'not stated in this deck'})
+    db = debt_plan(tk, deck)
+    fp = ({'equity_b': eq['equity_b'], 'debt_b': None, 'basis': 'printed',
+           'source_page': eq['page'], 'note': flat(eq['text'])[:250]}
+          if eq else {'equity_b': None, 'debt_b': None, 'basis': None,
+                      'note': 'not stated in this deck'})
+    if db:
+        fp['debt_b'] = db['debt_b']
+        fp['debt_basis'] = 'printed'
+        fp['debt_source_page'] = db['page']
+        fp['debt_note'] = flat(db['text'])[:250]
+    row['financing_plan'] = fp
     return row, flags
 
 def carry_windows(tk, tobj, flagged):
@@ -881,7 +900,12 @@ def main():
                     print('  OVERRIDE TARGET MISSING: %s %s' % (otk, oper))
                     continue
                 for fld, val in fields.items():
-                    orow[fld] = val
+                    # dict-valued overrides MERGE per key, so a pinned ruling on
+                    # (say) equity_b does not erase a freshly-extracted debt_b
+                    if isinstance(val, dict) and isinstance(orow.get(fld), dict):
+                        orow[fld] = {**orow[fld], **val}
+                    else:
+                        orow[fld] = val
                     applied += 1
         print('QC overrides applied: %d field(s)%s'
               % (applied, ('  ** %d TARGET ROWS MISSING **' % missing) if missing else ''))
