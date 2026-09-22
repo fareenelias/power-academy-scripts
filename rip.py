@@ -169,6 +169,9 @@ def period_from_name(fn):
     m = re.search(r'(?<!\d)(20\d{2})(?!\d)', fn)
     return f"FY {m.group(1)}" if m else "ND"
 def date_from_name(fn):
+    # S&P exports name files ..._2026-07-23_English.pdf — ISO first (fix 2026-09-21)
+    iso = re.search(r'(20\d{2})-(\d{2})-(\d{2})', fn)
+    if iso: return f"{iso.group(1)}-{iso.group(2)}-{iso.group(3)}"
     m = re.search(r'([A-Z][a-z]{2})[ ,_-]*(\d{1,2})[ ,_-]*(20\d{2})', fn)
     if not m: return "ND"
     mon = {"Jan":"01","Feb":"02","Mar":"03","Apr":"04","May":"05","Jun":"06",

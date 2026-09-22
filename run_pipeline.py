@@ -118,6 +118,10 @@ def main():
             log('%d. %-18s SKIPPED (--fast, needs network)' % (n, name))
             skipped += 1
             continue
+        if not os.path.exists(os.path.join(HERE, script)):
+            log('%d. %-18s SKIPPED - %s is not on disk (phantom deliverable; tracker 08-02)' % (n, name, script))
+            skipped += 1
+            continue
         log('%d. %-18s %s' % (n, name, desc))
         good, _ = run(script, args, a.dry_run)
         ok += 1 if good else 0
