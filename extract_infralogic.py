@@ -91,6 +91,23 @@ INV_FIELDS = {
 }
 
 
+def parse_managers(gp_string):
+    """Split Infralogic's comma-separated GP Name into individual managers.
+
+    Trap: a GP's own name can contain a comma — 'Global Infrastructure Partners
+    (GIP), a part of BlackRock' is ONE manager. Rule: a fragment starting with a
+    lowercase letter is a continuation of the previous name, not a new manager.
+    """
+    parts = [p.strip() for p in str(gp_string or "").split(",")]
+    out = []
+    for p in parts:
+        if out and (not p or p[:1].islower()):
+            out[-1] = (out[-1] + ", " + p).strip(", ")
+        else:
+            out.append(p)
+    return [p for p in out if p]
+
+
 def clean(v):
     if v is None:
         return None
@@ -170,13 +187,19 @@ def main():
 
     # ---------------- funds file
     gps = {}
-    for (gp, fund), grp in a.groupby(["GP Name", "Fund Name"], sort=True):
+    distinct_funds = set()
+    for (gp_raw, fund), grp in a.groupby(["GP Name", "Fund Name"], sort=True):
         row = grp.iloc[0]
+        managers = parse_managers(gp_raw)
         rec = {"fund_name": fund}
         rec.update({out: clean(row.get(src)) for src, out in FUND_FIELDS.items()})
         rec["investments_in_export"] = int(grp["Investments"].notna().sum())
         rec["_files"] = sorted(grp["_file"].unique())
-        gps.setdefault(gp, []).append(rec)
+        distinct_funds.add((gp_raw, fund))
+        for m in managers:
+            r2 = dict(rec)
+            r2["co_managers"] = [x for x in managers if x != m] or None
+            gps.setdefault(m, []).append(r2)
     for gp in gps:
         gps[gp].sort(key=lambda r: (r["vintage"] or 0), reverse=True)
 
@@ -194,7 +217,10 @@ def main():
             "fund-level values verified identical across each fund's rows before collapsing",
         ],
         "gp_count": len(gps),
-        "fund_count": sum(len(v) for v in gps.values()),
+        "fund_count": len(distinct_funds),
+        "_fund_count_note": "distinct funds; a co-managed fund is listed under EACH of its "
+                            "managers with `co_managers` naming the others, so summing the "
+                            "per-GP lists overcounts",
         "gps": gps,
     }
 
@@ -211,14 +237,18 @@ def main():
             "subsector": clean(row.get("Investment Subsector")),
             "owners": [],
         })
-        leg = {"gp": row["GP Name"], "fund": row["Fund Name"]}
-        leg.update({out: clean(row.get(src)) for src, out in INV_FIELDS.items()
-                    if out not in ("region", "country", "sector", "subsector")})
-        leg["status"] = status_bucket(leg.get("status_raw"))
-        leg["_file"] = row["_file"]
-        # dedupe identical legs across export files
-        if not any(o["gp"] == leg["gp"] and o["fund"] == leg["fund"] for o in asset["owners"]):
-            asset["owners"].append(leg)
+        managers = parse_managers(row["GP Name"])
+        for m in managers:
+            leg = {"gp": m, "fund": row["Fund Name"]}
+            leg.update({out: clean(row.get(src)) for src, out in INV_FIELDS.items()
+                        if out not in ("region", "country", "sector", "subsector")})
+            leg["status"] = status_bucket(leg.get("status_raw"))
+            if len(managers) > 1:
+                leg["co_managers"] = [x for x in managers if x != m]
+            leg["_file"] = row["_file"]
+            # dedupe identical legs across export files
+            if not any(o["gp"] == leg["gp"] and o["fund"] == leg["fund"] for o in asset["owners"]):
+                asset["owners"].append(leg)
 
     for asset in assets.values():
         asset["owner_count"] = len(asset["owners"])
@@ -239,6 +269,9 @@ def main():
             "asset names are Infralogic deal-style labels (e.g. 'Duquesne Light Company "
             "25.1% Stake...'), so the same underlying company can appear under multiple "
             "labels across different transactions — match on substrings, not equality",
+            "a co-managed fund's positions produce one owner leg per manager "
+            "(`co_managers` names the others) — equity figures are the position's, "
+            "never apportioned between managers",
         ],
         "asset_count": len(assets),
         "owner_leg_count": sum(x["owner_count"] for x in assets.values()),

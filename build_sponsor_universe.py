@@ -187,6 +187,10 @@ def inframation_shell():
 GP_MAP = {
     "Blackstone Group": "Blackstone Infrastructure",
     "Macquarie Asset Management": "Macquarie (MIRA/MIP)",
+    "Brookfield Asset Management": "Brookfield",
+    "Global Infrastructure Partners (GIP), a part of BlackRock": "Global Infrastructure Partners (BlackRock)",
+    "Kohlberg Kravis Roberts (KKR)": "KKR",
+    "Bernhard Capital Partners (BCP)": "Bernhard Capital Partners",
 }
 
 
@@ -333,7 +337,16 @@ def main():
                 for o in a["owners"]:
                     assets_by_gp.setdefault(o["gp"], []).append((a["name"], o["status"]))
         by_name = {s["name"]: s for s in sponsors_out}
+        co_manager_only = []
         for gp, funds in il_funds["gps"].items():
+            # a GP that appears ONLY as co-manager of someone else's fund does not get
+            # its own sponsor entry (noise: JV partners like AC Capitales, AllianzGI);
+            # its funds remain visible in infralogic_funds.json
+            sole = any(not f.get("co_managers") for f in funds)
+            known = GP_MAP.get(gp) in by_name or gp in by_name
+            if not sole and not known:
+                co_manager_only.append(gp)
+                continue
             block = infralogic_block(gp, funds, assets_by_gp, il_funds["_generated"])
             # hand-entered values in a prior block survive the enrichment
             prior_blk = (prior.get(GP_MAP.get(gp, gp), {}) or {}).get("inframation") or {}
@@ -374,6 +387,12 @@ def main():
         "sponsor_count": len(sponsors_out),
         "sponsors": sponsors_out,
     }
+    if args.infralogic_funds and co_manager_only:
+        out["_infralogic_co_managers_not_promoted"] = {
+            "reason": "appear only as co-manager of another GP's fund — no sponsor entry; "
+                      "their funds are in infralogic_funds.json",
+            "gps": sorted(co_manager_only),
+        }
 
     # atomic write
     dirn = os.path.dirname(os.path.abspath(args.out)) or "."
