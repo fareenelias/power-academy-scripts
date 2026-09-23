@@ -30,6 +30,8 @@ Also (extended data layers, added this session):
 
 import os, re, sys, glob, json
 from datetime import datetime
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from issuer_inference import infer_issuing_entity, load_issuer_names
 
 try:
     import openpyxl
@@ -796,10 +798,11 @@ def parse_maturity_year(v):
     return int(m.group(1)) if m else None
 
 
-def extract_credit_details(ws):
+def extract_credit_details(ws, ticker=None, company_name=None):
     """Extract per-instrument debt from Capital Structure Details sheet."""
     instruments = []
     header_seen = False
+    issuer_names = load_issuer_names(ticker, company_name) if ticker else []
     for row in ws.iter_rows(values_only=True):
         col0 = str(row[0]).strip() if row[0] else ''
         if col0 == 'Capital Structure Description':
@@ -816,22 +819,11 @@ def extract_credit_details(ws):
         if not amt_k or amt_k <= 0: continue
         maturity_raw = str(row[5]).strip() if len(row) > 5 and row[5] else None
         if maturity_raw and str(maturity_raw).upper() in ('NA','N/A',''): maturity_raw = None
-        # Infer issuing entity from description prefix or security type
+        # Issuing entity: ONE inferrer shared with issuer_inference.py (re-apply
+        # in place with `python issuer_inference.py` after a rule change).
         seniority = safe_str(row[6] if len(row) > 6 else None) or ''
         secured   = safe_str(row[7] if len(row) > 7 else None) or ''
-        # First word may be a known abbreviation (SCE, DVP, AEE-MO, etc.)
-        first_word = col0.split()[0] if col0 else ''
-        if re.match(r'^[A-Z]{2,5}$', first_word) and len(col0.split()) > 1:
-            inferred_entity = first_word
-        elif 'First Mortgage' in col0 or ('Secured' in seniority and secured == 'Yes'):
-            inferred_entity = 'OpCo (secured)'
-        elif 'Junior Subordinated' in col0 or 'Junior Sub' in col0:
-            inferred_entity = 'HoldCo (hybrid)'
-        elif secured == 'No' and 'Senior' in seniority:
-            inferred_entity = 'HoldCo (unsecured)'
-        else:
-            inferred_entity = None
-
+        inferred_entity = infer_issuing_entity(col0, seniority, secured, issuer_names)
         instruments.append({
             'description':    col0,
             'type':           safe_str(row[1] if len(row) > 1 else None),
@@ -1261,7 +1253,7 @@ def main():
         # ── Credit sheets ────────────────────────────────────────────────────
         cap_details, cur_ratings, cred_ratios, debt_analysis = [], [], {}, {}
         if 'Capital Structure Details' in sheets:
-            cap_details  = extract_credit_details(wb['Capital Structure Details'])
+            cap_details  = extract_credit_details(wb['Capital Structure Details'], ticker, companies[ticker].get('name'))
         if 'Current Ratings' in sheets:
             cur_ratings  = extract_current_ratings(wb['Current Ratings'])
         if 'Credit Ratios (x)' in sheets:
