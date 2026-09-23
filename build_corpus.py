@@ -80,7 +80,7 @@ STAGING_DIRS = [os.path.join(ROOT, 'data', 'Scans')]
 # Coverage (24) + the peer names that appear in the presentation set. Longest key
 # wins, so "American Water Works" beats "American States Water" on the right file.
 NAME_TICKER = {
-    'algonquin power': 'AQN', 'ameren': 'AEE', 'american states water': 'AWR',
+    'algonquin power': 'AQN', 'american electric power': 'AEP', 'ameren': 'AEE', 'american states water': 'AWR',
     'american water works': 'AWK', 'california water service': 'CWT',
     'cms energy': 'CMS', 'consumers energy': 'CMS', 'dominion energy': 'D',
     'edison international': 'EIX', 'entergy': 'ETR', 'essential utilities': 'WTRG',

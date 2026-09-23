@@ -122,6 +122,9 @@ NAME_TICKER = {
     "york water":"YORW","global water":"GWRS","american water":"AWK",
     "essential utilities":"WTRG","h2o america":"HTO","sjw":"HTO","middlesex":"MSEX",
     "algonquin":"AQN","liberty utilities":"AQN","empire district":"AQN",
+    "american electric power":"AEP","appalachian power":"AEP","indiana michigan power":"AEP",
+    "ohio power":"AEP","aep texas":"AEP","aep ohio":"AEP","southwestern electric power":"AEP",
+    "public service company of oklahoma":"AEP","kentucky power":"AEP","aep transmission":"AEP",
 }
 def ticker_from_name(fn):
     low = fn.lower().replace("_"," ").replace(","," ")
@@ -140,7 +143,7 @@ def ticker_from_name(fn):
 # cover fixes both. Filename resolution is kept as the fallback.
 COVERAGE_TICKERS = {
     'NEE','D','ETR','CMS','PPL','AEE','POR','EIX','PCG','HE','EVRG','ES','VST','TLN','XIFR',
-    'AWR','CWT','YORW','GWRS','AWK','WTRG','HTO','MSEX','AQN',
+    'AWR','CWT','YORW','GWRS','AWK','WTRG','HTO','MSEX','AQN','AEP',
 }
 EXCHANGE_TICKER_RE = re.compile(
     r'\b(?:NYSE(?:ARCA|AMERICAN|MKT)?|NASDAQ(?:GS|GM|CM)?|OTCPK|OTC|TSX|AMEX)\s*:\s*([A-Z]{1,5})\b')
@@ -216,7 +219,8 @@ def _build_transcript_txt(meta, raw, image_only=False):
     md=["---",f"ticker: {meta['ticker']}",f"period: {meta['period']}",
         f"call_date: {meta['call_date']}",f"call_type: {meta['call_type']}",
         f"source_folder: {meta['source_folder']}",f"source_file: {meta['source_file']}",
-        f"pages: {meta['pages']}",f"flag: {meta['flag']}","---",""]
+        f"pages: {meta['pages']}",f"flag: {meta['flag']}",
+        f"source_bytes: {meta.get('source_bytes','')}","---",""]
     if image_only:
         md += ["[[IMAGE-ONLY - NO TEXT LAYER - RUN OCR]]",
                "This PDF has no extractable text and Tesseract OCR was not available.",""]
@@ -258,6 +262,7 @@ def rip_transcript(path, folder, out_dir, used):
           "call_type":("special" if "special" in folder.lower() else "earnings"),
           "source_folder":folder,"source_file":fn,
           "source_url_path":f"transcripts/{folder}/{fn}",
+          "source_bytes":os.path.getsize(path),
           "pages":pages,"chars":len(cleaned),"flag":flag,"doc_type":"transcript"}
     # out name: TICKER_PERIOD.txt (specials get the date), de-duped across folders
     base=f"{meta['ticker']}_{meta['period'].replace(' ','-')}"
@@ -425,7 +430,8 @@ def rip_report(pdf_path, out_dir, use_ocr, do_tables, do_camelot, do_img2table):
 
     header=(f"[[FILE: {os.path.basename(pdf_path)} | {pages} pages | flag={flag} | "
             f"tables={n_tables}{(' '+tbl_note) if tbl_note else ''} | "
-            f"ripped {datetime.now().isoformat(timespec='seconds')}]]")
+            f"ripped {datetime.now().isoformat(timespec='seconds')} | "
+            f"source_bytes={os.path.getsize(pdf_path)}]]")
     with open(out_path,"w",encoding="utf-8") as f:
         f.write(header+"\n\n"+"\n\n".join(parts)+"\n")
 
@@ -477,9 +483,26 @@ def find_rip_by_source(out_dir, src_fn):
         if needle in head: return fp
     return None
 
+def _recorded_source_bytes(out_path):
+    """'source_bytes: N' (transcript front-matter) or 'source_bytes=N' (report [[FILE]] line)."""
+    try:
+        with open(out_path, encoding="utf-8", errors="ignore") as fh:
+            head = fh.read(800)
+    except OSError:
+        return None
+    m = re.search(r"source_bytes[:=]\s*(\d+)", head)
+    return int(m.group(1)) if m else None
+
 def is_up_to_date(pdf_path, out_path):
+    """Up to date when the rip records the PDF's byte size and it still matches - a bulk
+    copy/move that resets every PDF mtime (2026-08-02 did: 479 PDFs, and every run since
+    re-ripped all 458 transcripts) is then NOT a staleness signal. Rips that predate the
+    header fall back to the mtime rule."""
     if not os.path.exists(out_path): return False
     if os.path.getsize(out_path) < MIN_VALID_BYTES: return False
+    rec = _recorded_source_bytes(out_path)
+    if rec is not None:
+        return rec == os.path.getsize(pdf_path)
     return os.path.getmtime(out_path) >= os.path.getmtime(pdf_path)
 
 def write_rip_index(out_dir, entries, force):

@@ -79,7 +79,7 @@ PROTECTED_OUTPUTS = {
 COVERAGE_UNIVERSE = {
     "NEE", "D", "ETR", "CMS", "PPL", "AEE", "POR", "EIX", "PCG", "HE", "EVRG",
     "ES", "VST", "TLN", "XIFR", "AWR", "CWT", "YORW", "GWRS", "AWK", "WTRG",
-    "HTO", "MSEX", "AQN",
+    "HTO", "MSEX", "AQN", "AEP",
 }
 
 # Asset class uses the precedents.json vocabulary so a peer can be matched to a

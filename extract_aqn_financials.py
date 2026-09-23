@@ -331,9 +331,14 @@ class Extractor:
         # To restore it, convert at the Bank of Canada FXUSDCAD rate for the workbook
         # date and store it with an fx_conversion note, the way the J.P. Morgan AQN
         # price target was handled on 2026-07-31.
-        self.skip("tev", "printed in C$000 (TSX primary listing) while the rest of the "
-                         "workbook is US$000 - not stored rather than mixing currencies")
-        return
+        # 2026-09-23: the guard is the LABEL, not the ticker - AEP's block prints "($000)".
+        if "C$" in (label or "") or "C$" in (txt(cell(ks, r, 1)) or ""):
+            self.skip("tev", "printed in C$000 (TSX primary listing) while the rest of the "
+                             "workbook is US$000 - not stored rather than mixing currencies")
+            return
+        if v is None:
+            self.skip("tev", "no numeric value on the 'Total Enterprise Value' row")
+            return
         self.put("tev", v, "Key Stats!row %d '%s'" % (r, label))
 
     def _operating(self, op):
@@ -616,9 +621,14 @@ class Extractor:
         self.put("planned_capex", out, "%s!rows with a value" % name)
 
     def _debt_items(self, wb):
-        rows = sheet_rows(wb, "Debt Summary (Reported)")
+        # the 09-23-2026 CapIQ template renamed the sheet 'Debt Summary ($000)' (same shape)
+        name = "Debt Summary (Reported)"
+        rows = sheet_rows(wb, name)
         if not rows:
-            self.skip("debt_items", "no 'Debt Summary (Reported)' sheet")
+            name = "Debt Summary ($000)"
+            rows = sheet_rows(wb, name)
+        if not rows:
+            self.skip("debt_items", "no 'Debt Summary (Reported)' / 'Debt Summary ($000)' sheet")
             return
         out = []
         for r in range(3, len(rows) + 1):
@@ -626,7 +636,7 @@ class Extractor:
             v = num(cell(rows, r, 2))
             if a and v is not None:
                 out.append({"description": a, "amount": v, "maturity": None, "rate": None})
-        self.put("debt_items", out, "Debt Summary (Reported)!col A/B (thousands, as reported)")
+        self.put("debt_items", out, "%s!col A/B (thousands, as reported)" % name)
 
     def _dividends(self, wb):
         rows = sheet_rows(wb, "Dividends & Splits")

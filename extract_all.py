@@ -65,7 +65,7 @@ RIP_SCRIPT      = r'E:\PowerAcademy\scripts\rip.py'
 # 23-name coverage universe (for call-notes coverage reporting)
 COVERAGE_UNIVERSE = [
     'NEE','D','ETR','CMS','PPL','AEE','POR','EIX','PCG','HE','EVRG','ES','VST','TLN','XIFR',
-    'AWR','CWT','YORW','GWRS','AWK','WTRG','HTO','MSEX','AQN',
+    'AWR','CWT','YORW','GWRS','AWK','WTRG','HTO','MSEX','AQN','AEP',
 ]
 
 # Tickers that do NOT hold earnings calls (small water utilities) - excluded from
@@ -823,7 +823,7 @@ def extract_credit_details(ws, ticker=None, company_name=None):
         # in place with `python issuer_inference.py` after a rule change).
         seniority = safe_str(row[6] if len(row) > 6 else None) or ''
         secured   = safe_str(row[7] if len(row) > 7 else None) or ''
-        inferred_entity = infer_issuing_entity(col0, seniority, secured, issuer_names)
+        inferred_entity = infer_issuing_entity(col0, seniority, secured, issuer_names, ticker)
         instruments.append({
             'description':    col0,
             'type':           safe_str(row[1] if len(row) > 1 else None),

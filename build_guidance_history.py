@@ -159,6 +159,7 @@ CAP_BAND = {   # consolidated multi-year plan totals only; guards segment/projec
  'EVRG': (5, 40), 'D': (25, 120), 'EIX': (10, 60), 'AWK': (5, 60), 'HTO': (0.8, 5),
  'WTRG': (3, 15), 'AQN': (2, 20), 'ETR': (8, 120), 'NEE': (30, 200), 'AWR': (0.05, 2),
  'CWT': (0.3, 3), 'XIFR': (0.5, 10), 'POR': (2, 15), 'HE': (0.5, 6),
+ 'AEP': (30, 120),   # $54B 2025-29 / $72B 2026-30 plan; guards opco/segment figures
 }
 
 CAP_RECIPES = {

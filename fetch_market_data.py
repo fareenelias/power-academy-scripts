@@ -134,7 +134,7 @@ def fetch_quotes(tickers, apikey, delay=0.25):
 # ---------------------------------------------------------------------------
 # Regulated utilities — always show P/E, never EBITDA
 REGULATED_TICKERS = {
-    "NEE","D","ETR","CMS","PPL","AEE","POR","EIX","PCG","HE","EVRG","ES","AQN",
+    "NEE","D","ETR","CMS","PPL","AEE","POR","EIX","PCG","HE","EVRG","ES","AQN","AEP",
     "AWR","CWT","MSEX","YORW","GWRS","AWK","WTRG","HTO",
 }
 

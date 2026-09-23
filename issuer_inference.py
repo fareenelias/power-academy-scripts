@@ -61,6 +61,21 @@ ALIAS = {
     'Grand Gulf':      ('System Energy Resources', False),
     'Vistra Zero':     ('Vistra Zero Operating Co', False),
     'Vistra Operations': ('Vistra Operations Co', False),
+    # AEP (joined 2026-09-23): opcos issue unsecured senior notes, so the suffix is the only tell
+    'APCo':            ('Appalachian Power', False),
+    'Appalachian Power': ('Appalachian Power', False),
+    'I&M':             ('Indiana Michigan Power', False),
+    'Indiana Michigan Power': ('Indiana Michigan Power', False),
+    'OPCo':            ('Ohio Power', False),
+    'Ohio Power':      ('Ohio Power', False),
+    'PSO':             ('Public Service Co. of Oklahoma', False),
+    'SWEPCo':          ('Southwestern Electric Power', False),
+    'SWEPCO':          ('Southwestern Electric Power', False),
+    'AEP Texas':       ('AEP Texas', False),
+    'AEPTCo':          ('AEP Transmission Co', False),
+    'KPCo':            ('Kentucky Power', False),
+    'Kentucky Power':  ('Kentucky Power', False),
+    'Transource Energy': ('Transource Energy', False),
 }
 ALIAS_TOKS = sorted(((' ' + ' '.join(_n) + ' '), v) for k, v in ALIAS.items()
                     for _n in [re.sub(r'[^a-z0-9]+', ' ', k.lower().replace('&', ' and ')).split()])
@@ -150,7 +165,7 @@ def _klass(desc, seniority, secured):
     return None
 
 
-def infer_issuing_entity(desc, seniority, secured, issuer_names):
+def infer_issuing_entity(desc, seniority, secured, issuer_names, ticker=None):
     desc = desc or ''
     seniority = seniority or ''
     secured = secured or ''
@@ -168,6 +183,9 @@ def infer_issuing_entity(desc, seniority, secured, issuer_names):
             return f'{role} · {disp}' + (f' ({k})' if k else '')
     first = desc.split()[0].rstrip(':,-') if desc.split() else ''
     if re.match(r'^[A-Z][A-Z&]{1,5}$', first) and first not in NOT_ISSUER and len(desc.split()) > 1:
+        if ticker and first == ticker:
+            hold = next((disp for disp, h, _ in issuer_names if h), None) or first
+            return f'HoldCo · {hold}' + (f' ({k})' if k else '')
         return f'OpCo · {first}' + (f' ({k})' if k else '')
     # 3. class only
     if k == 'hybrid':    return 'HoldCo (hybrid)'
@@ -187,7 +205,7 @@ def reapply(capiq_path=None, dry=False):
         names = load_issuer_names(tk, c.get('name'))
         before = collections.Counter(r.get('issuing_entity') for r in rows)
         for r in rows:
-            new = infer_issuing_entity(r.get('description'), r.get('seniority'), r.get('secured'), names)
+            new = infer_issuing_entity(r.get('description'), r.get('seniority'), r.get('secured'), names, tk)
             if new != r.get('issuing_entity'):
                 r['issuing_entity'] = new; changed += 1
         after = collections.Counter(r.get('issuing_entity') for r in rows)

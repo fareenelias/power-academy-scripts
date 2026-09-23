@@ -133,7 +133,7 @@ for tkr, arr in events.items():
 
 # ── controls - refuse to write a file that fails any of them ─────────────────
 UNIVERSE = ['NEE','D','ETR','CMS','PPL','AEE','POR','EIX','PCG','HE','EVRG','ES','VST','TLN',
-            'XIFR','AWR','CWT','YORW','GWRS','AWK','WTRG','HTO','MSEX','AQN']
+            'XIFR','AWR','CWT','YORW','GWRS','AWK','WTRG','HTO','MSEX','AQN','AEP']
 for t in UNIVERSE:
     events.setdefault(t, [])   # every coverage name present, even if empty
 total = sum(len(v) for v in events.values())
