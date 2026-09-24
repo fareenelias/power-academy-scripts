@@ -79,22 +79,6 @@ try:
     PINNED_IDS = {t: list(v[1]) for t, v in _TERR_WHITELIST.items()}
 except Exception as _e:          # never run silently without the pins
     raise SystemExit(f"slice_territories_by_id.WHITELIST not importable ({_e}) - run from the scripts folder")
-# Generation affiliates (2026-09-24): nuclear / renewable / merchant fleets that sit in entities
-# neither the retail whitelist nor the name matching reaches. Found by a brand scan of the EIA-860
-# Operable + Proposed sheets; each id is checked against the expected utility-name fragment below
-# (a mismatch is logged loudly and the id is NOT added). Rejected by that scan: East Kentucky Power
-# Coop, Old Dominion Electric Coop, TotalEnergies ('talen'), Ohio Power and Light LLC (not AEP).
-GEN_AFFILIATE_IDS = {
-    "D":    {"5221": "dominion energy nuclear conn", "5248": "dominion energy inc", "58468": "dominion renewable"},
-    "ETR":  {"12465": "system energy resources"},
-    "NEE":  {"55906": "point beach", "6854": "seabrook", "57026": "montezuma", "57249": "renewable fuels",
-             "57460": "wolf ridge", "58289": "desert sunlight 300", "58290": "desert sunlight 250",
-             "58353": "majestic", "58515": "mountain view solar", "59115": "seiling", "64421": "nexteraenergy"},
-    "TLN":  {"14266": "susquehanna"},
-    "VST":  {"64225": "energy harbor nuclear", "63726": "vistra zero"},
-    "CMS":  {"3837": "cms generation", "3838": "cms generation"},
-}
-
 DENY_IDS = {
     "AEE": {"3716": "Clay-Union Electric Corp (SD co-op)", "19435": "Union Electric Membership Corp (NC co-op)"},
 }
@@ -475,16 +459,6 @@ def match_companies(gen_df: pd.DataFrame, territories: dict) -> dict:
         for did in DENY_IDS.get(ticker, {}):
             if did in matched_ids:
                 i = matched_ids.index(did); matched_ids.pop(i); matched_names.pop(i)
-        for gid, frag in GEN_AFFILIATE_IDS.get(ticker, {}).items():
-            nm = str(gen_utils.get(gid, ""))
-            if gid not in gen_utils:          # proposed-only affiliate (no operable units yet): nothing to check against
-                if gid not in matched_ids:
-                    matched_ids.append(gid); matched_names.append(f"{frag} (proposed-only)")
-                log.info(f"{ticker}: generation affiliate {gid} ({frag}) has no operable units - added on the pinned name")
-            elif frag not in nm.lower():
-                log.warning(f"{ticker}: generation affiliate {gid} expected '{frag}', EIA has {nm!r} - NOT added")
-            elif gid not in matched_ids:
-                matched_ids.append(gid); matched_names.append(nm)
         pinned_added = [pid for pid in PINNED_IDS.get(ticker, []) if pid not in matched_ids]
         for pid in pinned_added:
             matched_ids.append(pid); matched_names.append(gen_utils.get(pid, _TERR_WHITELIST[ticker][1][pid]))

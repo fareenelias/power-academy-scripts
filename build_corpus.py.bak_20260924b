@@ -160,23 +160,17 @@ def tickers_from_name(name, path=None):
         return pre
     low = re.sub(r'[_]+', ' ', name).lower()
     low = low.replace('&', ' and ') if 'pg&e' not in low else low
-    # EVERY occurrence of each key, not just the first (2026-09-24). The joint decks are
-    # titled 'NextEra Energy Partners, LP, NextEra Energy, Inc., Q1 2022 Earnings Call':
-    # the first 'nextera energy' sits inside the longer 'nextera energy partners' span and
-    # was skipped, and the SECOND occurrence was never searched - so 13 quarters of NEE
-    # decks and transcripts were filed under XIFR alone. Order of `hits` = order found by
-    # key length, as before.
     hits, spans = [], []
     for k in _KEYS:
         i = low.find(k)
-        while i >= 0:
-            if not any(s <= i < e for s, e in spans):   # not inside a longer key
-                spans.append((i, i + len(k)))
-                t = NAME_TICKER[k]
-                if t not in hits:
-                    hits.append(t)
-                break
-            i = low.find(k, i + 1)
+        if i < 0:
+            continue
+        if any(s <= i < e for s, e in spans):     # already covered by a longer key
+            continue
+        spans.append((i, i + len(k)))
+        t = NAME_TICKER[k]
+        if t not in hits:
+            hits.append(t)
     if not hits and path:
         # `data\EquityResearch\GWRS\Document_20260305_0001.pdf` - the ticker is the
         # FOLDER, not the filename. Fallback only: it can never override a real hit.

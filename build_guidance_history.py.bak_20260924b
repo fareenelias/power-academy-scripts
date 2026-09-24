@@ -815,12 +815,6 @@ _LT_COLLIDE = re.compile(r'load\s+growth|dividend|payout|rate\s+base', re.I)
 _LT_MID = re.compile(r'shareholder\s+return|\bTSR\b', re.I)   # a TSR label between the range and the EPS word
 
 def lt_growth_scan(fb, passes=(1, 2)):
-    """First match only (the controls' contract). See _lt_iter for every match."""
-    for r in _lt_iter(fb, passes):
-        return r
-    return None
-
-def _lt_iter(fb, passes=(1, 2)):
     """Per-text LT-EPS-growth scan; module-level so the controls can run on strings.
     pass 1 = range BEFORE the EPS word ('6% to 8% EPS CAGR 2026-2030'); pass 2 = EPS word
     first ('EPS growth ... near upper end of 6% to 8%'), the looser form."""
@@ -828,12 +822,7 @@ def _lt_iter(fb, passes=(1, 2)):
           r'(?:EPS|earnings per share|adjusted EPS|operating earnings)[^.%]{0,30}?(?:CAGR|growth)')
     rx2 = (r'(?:EPS|earnings per share|operating earnings)[^.%]{0,40}?(?:CAGR|growth)[^.%]{0,40}?(?P<lo>\d{1,2}(?:\.\d)?)\s*%'
            r'\s*(?:' + DASH + r'|to|-)\s*(?P<hi>\d{1,2}(?:\.\d)?)\s*%')
-    # pass 3 (2026-09-24): NEE's '6 to 8% annual growth rate through 2026, off the 2024 adjusted
-    # EPS expectations range' - no '%' on the low end, and 'growth' comes BEFORE 'EPS'. Anchored
-    # on 'annual growth rate' + 'off the YYYY adjusted EPS' so a load/dividend growth rate can't fit.
-    rx3 = (r'(?P<lo>\d{1,2}(?:\.\d)?)\s*%?\s*(?:' + DASH + r'|to|-)\s*(?P<hi>\d{1,2}(?:\.\d)?)\s*%\s*annual growth rate'
-           r'[^.%]{0,40}?off (?:the )?20\d\d (?:adjusted |operating )?(?:EPS|earnings per share)')
-    for r_ in [x for i, x in ((1, rx), (2, rx2), (3, rx3)) if i in passes]:
+    for r_ in [x for i, x in ((1, rx), (2, rx2)) if i in passes]:
         for m in re.finditer(r_, fb, re.I):
             lo, hi = float(m.group('lo')), float(m.group('hi'))
             if not (0 < lo < hi <= 20): continue
@@ -844,11 +833,6 @@ def _lt_iter(fb, passes=(1, 2)):
             # 6% ... EPS growth' must keep its true 4-6 match).
             cut = pre.rfind('%')
             if cut >= 0: pre = pre[cut + 1:]
-            # a bullet starts a new clause (2026-09-24): '...quarterly common stock dividend to $0.2575 per
-            # share \u27a2Extended 6% - 8% annual EPS ... growth' (PPL Q4 2023) - the dividend belongs to the
-            # previous bullet, not to our range.
-            bcut = max(pre.rfind(ch) for ch in '\u27a2\u2022\u25aa\u25cf\uf0a7')
-            if bcut >= 0: pre = pre[bcut + 1:]
             # '... Rate Base CAGR through 2030 7%-9% Operating Earnings Growth': a clause that
             # closes on a through-year belongs to the figure BEFORE it, not to ours (AEP 2026-09-23).
             if re.search(r'\b(?:through|to|by)\s+(?:at least\s+)?20\d\d\W*$', pre, re.I): pre = ''
@@ -857,51 +841,27 @@ def _lt_iter(fb, passes=(1, 2)):
             # either ('~10%-12% Total Shareholder Return ... EPS growth of 6%-8%', AEP Q2 2025).
             if _LT_MID.search(fb[m.end('hi'): m.end()]): continue
             seg = fb[max(0, m.start() - 140): m.end() + 160]
-            # 'vs' removed 2026-09-24: in grid slides it binds to a neighbouring metric's comparison year
-            # ('~$345M or >25% reduction 2025E vs 2018A' - EVRG O&M) and gave an EPS algorithm a 2018 base.
-            by = re.search(r'(?:off|from|using|base(?:d)? (?:off|on))[^.]{0,60}?(20\d\d)', seg)
+            by = re.search(r'(?:off|from|using|base(?:d)? (?:off|on)|vs\.?)[^.]{0,60}?(20\d\d)', seg)
             thru = re.search(r'through (?:at least )?(20\d\d)', seg)
-            # a printed window right after the match ('6% to 8% EPS CAGR 2026-2030') supplies BOTH years
-            # when neither was found (2026-09-24); never overrides a year the phrases above found.
-            win_m = re.match(r'\s*(?:from\s+)?(20\d\d)E?\s*(?:' + DASH + r'|to|-)\s*(20\d\d)E?', fb[m.end(): m.end() + 22])
-            if win_m and not by and not thru:
-                by, thru = win_m, re.match(r'.*', '')   # placeholders; values set below
-                _wy = (win_m.group(1), win_m.group(2))
-            else:
-                _wy = None
-            yield {'rate_low_pct': lo, 'rate_high_pct': hi,
-                   'base_year': _wy[0] if _wy else (by.group(1) if by else None),
-                   'through_year': _wy[1] if _wy else (thru.group(1) if thru else None),
-                   'basis': 'printed',
-                   'text': fb[max(0, m.start() - 120): m.end() + 120]}
+            return {'rate_low_pct': lo, 'rate_high_pct': hi,
+                    'base_year': by.group(1) if by else None,
+                    'through_year': thru.group(1) if thru else None,
+                    'basis': 'printed',
+                    'text': fb[max(0, m.start() - 120): m.end() + 120]}
+    return None
 
 def lt_growth(tk, deck):
-    """VALUE-PRESERVING page choice (2026-09-24). The RATE is what it always was: the first match
-    in page order (passes 1+2 per page). Among every match in the deck with that SAME rate, the one
-    carrying the most window metadata (base year, through year) supplies the page and the years;
-    ties keep the first. Fixes AEE ('EPS growth ... 6% to 8%' on p11 won over '6% to 8% EPS CAGR
-    2026-2030' on p17) without the POR/D base-year loss the 09-24 pass-order attempt caused.
-    Pass 3 is tried only when passes 1-2 find nothing anywhere in the deck."""
-    if tk in NO_EPS_GUIDANCE:      # XIFR: joint NEE/NEP decks carry NEE's EPS algorithm (2026-09-24)
-        return None
+    # NOTE 2026-09-24: 'pass 1 across the whole deck before pass 2' was tried and REVERTED -
+    # it restored AEE's window (p17 '6% to 8% EPS CAGR 2026-2030') but cost POR 3 cells and
+    # D 1 cell their base/through years (rates identical in all 136). Open design item:
+    # rank candidates by how much window metadata they carry, not by page.
     pid = deck['id']
-    allm = []
     for pno, body in pages(pid):
-        for r in _lt_iter(flat(body), (1, 2)):
+        r = lt_growth_scan(flat(body))
+        if r:
             r['page'] = pno
-            allm.append(r)
-    if not allm:
-        for pno, body in pages(pid):
-            for r in _lt_iter(flat(body), (3,)):
-                r['page'] = pno
-                allm.append(r)
-    if not allm:
-        return None
-    first = allm[0]
-    same = [r for r in allm if (r['rate_low_pct'], r['rate_high_pct']) == (first['rate_low_pct'], first['rate_high_pct'])]
-    meta = lambda r: (r['base_year'] is not None) + (r['through_year'] is not None)
-    best = max(same, key=meta)          # max() keeps the FIRST among equals
-    return best if meta(best) > meta(first) else first
+            return r
+    return None
 
 # Embedded controls - REAL slide texts. The three POR defects must resolve to the
 # printed algorithm (or nothing), never to the load-growth range; the true
@@ -912,10 +872,6 @@ _LT_CONTROLS = [
     ("challenging power markets High-tech and digital growth + Sustained residential demand Re-affirming 2021 load growth of 2.5% to 3.0% Re-affirming 4% to 6% long-term EPS growth Re-affirming full year 2021 EPS guidance of $2.70 to $2.85 per diluted share", (4.0, 6.0)),
     ("rming \u2022 2026 adjusted earnings guidance of $3.33 to $3.53 per diluted share \u2022 2026 weather normalized load growth of 1.5% - 2.5% and long-term load growth of 3% through 2030 \u2022 Long-term EPS growth of 5% to 7% from 2024 adjusted EPS guidance midpoint", (5.0, 7.0)),
     ("load growth of 2.5% to 3.0% supporting EPS growth over the plan", None),
-    # PPL Q4 2023 (2026-09-24): a 'dividend' in the PREVIOUS bullet must not refuse the range
-    ("Announces 7.3% increase to quarterly common stock dividend to $0.2575 per share \u27a2Extended 6% - 8% annual EPS and dividend growth targets through at least 2027", (6.0, 8.0)),
-    # ...but a dividend in the SAME clause still refuses
-    ("\u2022 dividend growth of 6% - 8% annual EPS growth", None),
     ("Strong 5% to 7% adjusted EPS growth Expect dividend growth rate in line with EPS growth", (5.0, 7.0)),
     ("Expect 6% to 8% EPS CAGR from 2021-2025 Using 2021 EPS guidance midpoint", (6.0, 8.0)),
     ("Reaffirming adjusted EPS growth target of 4% to 6% through 2026 off the original 2023 adjusted EPS guidance midpoint of $3.65", (4.0, 6.0)),
@@ -923,32 +879,6 @@ _LT_CONTROLS = [
     ("~10%-12% Total Shareholder Return \u2022 Targeted long-term operating EPS growth of 6%-8% \u2022 Dividend payout ratio of 55%-65%", (6.0, 8.0)),
     ("$72B Capital Plan 2026-2030 ~10% Rate Base CAGR through 2030 7%-9% Annual Operating Earnings Growth Rate With an expected CAGR of greater than 9% through 2030", (7.0, 9.0)),
 ]
-
-_LT_CONTROLS += [
-    # NEE Q4 2023 wording (pass 3 via lt_growth; lt_growth_scan's default passes must NOT match it)
-]
-def _run_lt_pass3_controls():
-    t = "13 \u2022 Expect 6 to 8% annual growth rate through 2026, off the 2024 adjusted EPS expectations range \u2022 From 2021 to 2026"
-    r = next(_lt_iter(t, (3,)), None)
-    assert r and (r['rate_low_pct'], r['rate_high_pct'], r['base_year'], r['through_year']) == (6.0, 8.0, '2024', '2026'), 'LT PASS3 CONTROL FAILED: %r' % (r,)
-    assert lt_growth_scan(t) is None, 'LT PASS3 CONTROL FAILED: pass 3 leaked into the default scan'
-    assert next(_lt_iter("Expect 2 to 3% annual growth rate in retail load off the 2024 base", (3,)), None) is None, \
-        'LT PASS3 CONTROL FAILED: a load growth rate was accepted'
-    # value-preserving preference: same rate on two pages, the later one carries the window
-    _pc['__lt_ctl'] = [(11, "Expect annual EPS growth consistently near upper end of 6% to 8% guidance range"),
-                       (17, "Expect 6% to 8% EPS CAGR 2026-2030 off 2026 guidance midpoint through 2030")]
-    try:
-        r = lt_growth('CTL', {'id': '__lt_ctl'})
-    finally:
-        _pc.pop('__lt_ctl', None)
-    assert r and r['page'] == 17 and (r['rate_low_pct'], r['rate_high_pct']) == (6.0, 8.0), 'LT PREF CONTROL FAILED: %r' % (r,)
-    w = next(_lt_iter("Expect 6% to 8% EPS CAGR 2026-2030 Strategically allocating capital", (1, 2)), None)
-    assert w and (w['base_year'], w['through_year']) == ('2026', '2030'), 'LT WINDOW CONTROL FAILED: %r' % (w,)
-    _pc['__lt_x'] = [(1, "Expect 6 to 8% annual growth rate through 2026, off the 2024 adjusted EPS expectations range")]
-    try:
-        assert lt_growth('XIFR', {'id': '__lt_x'}) is None, 'LT XIFR CONTROL FAILED'
-    finally:
-        _pc.pop('__lt_x', None)
 
 def _run_lt_controls():
     for txt, want in _LT_CONTROLS:
@@ -960,7 +890,6 @@ def _run_lt_controls():
             assert pair == want, 'LT CONTROL FAILED: %r -> %r, want %r' % (txt[:60], pair, want)
 
 _run_lt_controls()
-_run_lt_pass3_controls()
 
 def rate_base(tk, deck):
     pid = deck['id']
