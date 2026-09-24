@@ -40,6 +40,29 @@ OWNER_AFFILIATE_IDS = {
     '61901': ('XIFR', "NextEra Energy Partners LP - the partnership itself (renamed XPLR Infrastructure 2025); 49.9% of the NEP tranche at Desert Sunlight 250/300 - basis: EIA owner name"),
     '56622': ('NEE', "Shaw Creek Solar (aka Aiken County Solar) - 100% owned by NextEra Energy Resources; confirmed by Fareen 2026-09-24 (EIA owner address is NextEra HQ, 700 Universe Blvd)"),
 }
+# S&P-authoritative plant lists (owner vehicles whose EIA operator-ID attribution is unreliable).
+# ticker -> data file; each file maps S&P plants to EIA plant codes (+ optional technology filter).
+SP_AUTHORITATIVE = {'XIFR': os.path.join(BASE, 'data', 'xplr_plant_map.json')}
+def load_sp_maps():
+    out = {}
+    for t, path in SP_AUTHORITATIVE.items():
+        if not os.path.exists(path):
+            continue
+        m = collections.defaultdict(list)
+        for p in json.load(open(path, encoding='utf-8')).get('plants', []):
+            for e in p.get('eia', []):
+                m[str(e['plant_code'])].append((e.get('tech'), float(p['xifr_pct']) / 100.0, p['sp_name']))
+        out[t] = m
+    return out
+def sp_share(spm, t, plant, g):
+    for tf, f, n in spm.get(t, {}).get(plant, ()):
+        if tf is None or tf == g:
+            return f, n
+    return None, None
+def sp_filter(spm, ts, plant):
+    # drop an S&P-authoritative ticker from operator attribution at plants its S&P list does not hold
+    return {t for t in (ts or ()) if t not in spm or plant in spm[t]}
+
 # Plant-level ownership that REPLACES Schedule 4 for every generator at the plant, where EIA's
 # owner rows are stale. owners = [(coverage ticker or None, fraction, name)]; stated source required.
 PLANT_OWNERSHIP_OVERRIDES = {
@@ -170,6 +193,7 @@ def main():
         own[(str(r.get('Plant Code')).split('.')[0], str(r.get('Generator ID')))].append(
             (str(r.get('Ownership ID')).strip().split('.')[0], f, r.get('Owner Name')))
     bad_sum = [k for k, v in own.items() if abs(sum(f for _, f, _ in v) - 1.0) > 0.02]
+    spm = load_sp_maps()
     oid2t = collections.defaultdict(set, {k: set(v) for k, v in uid2t.items()})
     for oid, (t, _why) in OWNER_AFFILIATE_IDS.items():
         oid2t[oid].add(t)
@@ -190,8 +214,8 @@ def main():
     for r in sheet_rows(wb, 'Operable'):
         if not str(r.get('Status') or '').upper().startswith(('OP', 'SB', 'OS', 'OA')):
             continue
-        ts = uid2t.get(str(r.get('Utility ID')).strip().split('.')[0]) or set()
         key = (str(r.get('Plant Code')).split('.')[0], str(r.get('Generator ID')))
+        ts = sp_filter(spm, uid2t.get(str(r.get('Utility ID')).strip().split('.')[0]), key[0])
         mw = num(r.get('Nameplate Capacity (MW)')) or 0.0
         g = group(r.get('Technology'))
         # ownership share per coverage ticker (v2)
@@ -203,6 +227,24 @@ def main():
             ol = [(oid2t.get(oid, set()), f, n) for oid, f, n in own[key]]
         else:
             ol = None
+        # S&P-authoritative owner (XIFR): its share comes from the S&P list; the other coverage owners
+        # keep their EIA-derived shares, scaled down to fit the remainder. Explicit plant overrides win.
+        if key[0] not in PLANT_OWNERSHIP_OVERRIDES:
+            for st_t in spm:
+                f_sp, n_sp = sp_share(spm, st_t, key[0], g)
+                base = ol if ol is not None else [(set(ts), 1.0, r.get('Utility Name'))]
+                others = [(tks - {st_t}, f, n) for tks, f, n in base]
+                if f_sp is None:
+                    if ol is not None: ol = [o for o in others]          # not an S&P plant: never credit st_t here
+                    continue
+                cov = sum(f for tks, f, _ in others if tks)
+                k_sc = min(1.0, (1.0 - f_sp) / cov) if cov > 0 else 1.0
+                covl = [(tks, f * k_sc, n) for tks, f, n in others if tks]
+                rem = max(0.0, 1.0 - f_sp - sum(f for _, f, _ in covl))
+                nonc = [(tks, f, n) for tks, f, n in others if not tks]
+                nsum = sum(f for _, f, _ in nonc)
+                nonc = [(tks, f * rem / nsum, n) for tks, f, n in nonc] if nsum > 0 else ([(set(), rem, 'Other owners (not itemised by S&P)')] if rem > 1e-6 else [])
+                ol = [({st_t}, f_sp, '%s (S&P: %s)' % (st_t, n_sp))] + covl + nonc
         share = collections.Counter()
         if ol is not None:
             for tks, f, _ in ol:
@@ -218,14 +260,14 @@ def main():
                 x['joint'].append({'plant': r.get('Plant Name'), 'plant_code': key[0], 'unit': key[1], 'state': r.get('State'),
                                    'tech': g, 'mw': round(mw, 1), 'share_pct': round(100 * f, 1), 'owned_mw': round(mw * f, 1),
                                    'operator': r.get('Utility Name'), 'operated_by_you': t in ts,
-                                   'co_owners': [{'name': n, 'pct': round(100 * ff, 2)} for tks, ff, n in ol if t not in tks],
+                                   'co_owners': [{'name': n, 'pct': round(100 * ff, 2)} for tks, ff, n in ol if t not in tks and ff > 1e-9],
                                    **({'ownership_source': PLANT_OWNERSHIP_OVERRIDES[key[0]]['source']} if key[0] in PLANT_OWNERSHIP_OVERRIDES else {})})
         for t in ts:                      # operators with 0% ownership still appear in the operated view
             if ol is not None and t not in share:
                 T(t)['joint'].append({'plant': r.get('Plant Name'), 'plant_code': key[0], 'unit': key[1], 'state': r.get('State'),
                                       'tech': g, 'mw': round(mw, 1), 'share_pct': 0.0, 'owned_mw': 0.0,
                                       'operator': r.get('Utility Name'), 'operated_by_you': True,
-                                      'co_owners': [{'name': n, 'pct': round(100 * ff, 2)} for _, ff, n in ol]})
+                                      'co_owners': [{'name': n, 'pct': round(100 * ff, 2)} for _, ff, n in ol if ff > 1e-9]})
         if not ts:
             continue
         oy = yr(r.get('Operating Year')); ry = yr(r.get('Planned Retirement Year'))
@@ -251,7 +293,7 @@ def main():
                                         'retire_year': ry, 'status': r.get('Status')})
 
     for r in sheet_rows(wb, 'Proposed'):
-        ts = uid2t.get(str(r.get('Utility ID')).strip().split('.')[0])
+        ts = sp_filter(spm, uid2t.get(str(r.get('Utility ID')).strip().split('.')[0]), str(r.get('Plant Code')).split('.')[0])
         if not ts:
             continue
         mw = num(r.get('Nameplate Capacity (MW)')) or 0.0
@@ -269,7 +311,7 @@ def main():
             # retired during/after the performance year: its 2024 generation sits in EIA-923 but its MW is not in 'Operable'
             pk = (str(r.get('Plant Code')).split('.')[0], str(r.get('Prime Mover') or '').strip().upper())
             pmcap[pk]['partial'] = True
-        ts = uid2t.get(str(r.get('Utility ID')).strip().split('.')[0])
+        ts = sp_filter(spm, uid2t.get(str(r.get('Utility ID')).strip().split('.')[0]), str(r.get('Plant Code')).split('.')[0])
         if not ts:
             continue
         if not ryr or ryr < 2020 or not str(r.get('Status') or '').upper().startswith('RE'):
@@ -325,6 +367,9 @@ def main():
             'utility_ids': (idmap.get(t) or {}).get('utility_ids'),
         }
     doc['_perf_qc'] = perf_qc
+    for st_t, path in SP_AUTHORITATIVE.items():
+        if st_t in spm:
+            doc['_caveats'].append("%s: owned view follows the S&P Global plant list (%s); its operated view is limited to those plants because its EIA operator-ID list is unreliable - for this name the owned figure is the meaningful one." % (st_t, os.path.basename(path)))
     if perf:
         doc['_caveats'].append("Capacity factor / heat rate: EIA-923 %d final, plant x prime-mover net generation over the EIA-860 %d nameplate of that plant's generators (operated view); plant-prime-movers with a unit added or retired in or after %d are excluded (part-year), as are any computing above 100%%. Heat rate = fuel MMBtu for electricity / net MWh, fossil only." % (PERF_YEAR, AS_OF_YEAR, PERF_YEAR))
     doc['_ownership_qc'] = {'owner_affiliate_ids': {k: {'ticker': v[0], 'why': v[1]} for k, v in OWNER_AFFILIATE_IDS.items()},
