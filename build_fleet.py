@@ -30,6 +30,12 @@ Z923 = os.path.join(BASE, 'data', 'eia_cache', 'eia923_2024.zip')   # optional; 
 PERF_YEAR = 2024
 HOURS = 8784                  # 2024 is a leap year
 FOSSIL = {'Coal', 'Gas CC', 'Gas CT/recip', 'Gas steam', 'Oil'}
+# Schedule 4 OWNER IDs that belong to a coverage name but are not operator IDs in
+# eia_utility_id_map.json. Used for the owned view ONLY - never for operator attribution.
+# Add an entry only with a stated source.
+OWNER_AFFILIATE_IDS = {
+    '62643': ('TLN', "MC Project Company LLC - owns Martins Creek 3/4 (and retired CTG1-4) 100%; confirmed a Talen entity by Fareen 2026-09-24"),
+}
 AS_OF_YEAR = 2025            # data year of the EIA-860 file
 NOW = date.today().year
 
@@ -150,6 +156,9 @@ def main():
         own[(str(r.get('Plant Code')).split('.')[0], str(r.get('Generator ID')))].append(
             (str(r.get('Ownership ID')).strip().split('.')[0], f, r.get('Owner Name')))
     bad_sum = [k for k, v in own.items() if abs(sum(f for _, f, _ in v) - 1.0) > 0.02]
+    oid2t = collections.defaultdict(set, {k: set(v) for k, v in uid2t.items()})
+    for oid, (t, _why) in OWNER_AFFILIATE_IDS.items():
+        oid2t[oid].add(t)
 
     out = {}
     def T(t):
@@ -175,7 +184,7 @@ def main():
         share = collections.Counter()
         if key in own:
             for oid, f, _ in own[key]:
-                for t in uid2t.get(oid, ()):
+                for t in oid2t.get(oid, ()):
                     share[t] += f
         else:
             for t in ts:
@@ -187,7 +196,7 @@ def main():
                 x['joint'].append({'plant': r.get('Plant Name'), 'plant_code': key[0], 'unit': key[1], 'state': r.get('State'),
                                    'tech': g, 'mw': round(mw, 1), 'share_pct': round(100 * f, 1), 'owned_mw': round(mw * f, 1),
                                    'operator': r.get('Utility Name'), 'operated_by_you': t in ts,
-                                   'co_owners': [{'name': n, 'pct': round(100 * ff, 1)} for oid, ff, n in own[key] if t not in uid2t.get(oid, ())]})
+                                   'co_owners': [{'name': n, 'pct': round(100 * ff, 1)} for oid, ff, n in own[key] if t not in oid2t.get(oid, ())]})
         for t in ts:                      # operators with 0% ownership still appear in the operated view
             if key in own and t not in share:
                 T(t)['joint'].append({'plant': r.get('Plant Name'), 'plant_code': key[0], 'unit': key[1], 'state': r.get('State'),
@@ -295,7 +304,10 @@ def main():
     doc['_perf_qc'] = perf_qc
     if perf:
         doc['_caveats'].append("Capacity factor / heat rate: EIA-923 %d final, plant x prime-mover net generation over the EIA-860 %d nameplate of that plant's generators (operated view); plant-prime-movers with a unit added or retired in or after %d are excluded (part-year), as are any computing above 100%%. Heat rate = fuel MMBtu for electricity / net MWh, fossil only." % (PERF_YEAR, AS_OF_YEAR, PERF_YEAR))
-    doc['_ownership_qc'] = {'schedule4_generators': len(own), 'share_sum_off_by_gt_2pct': len(bad_sum),
+    doc['_ownership_qc'] = {'owner_affiliate_ids': {k: {'ticker': v[0], 'why': v[1]} for k, v in OWNER_AFFILIATE_IDS.items()},
+                            'operated_zero_share_units': {t: sorted({u['plant'] for u in out[t]['joint'] if u['operated_by_you'] and u['share_pct'] == 0})
+                                                          for t in out if any(u['operated_by_you'] and u['share_pct'] == 0 for u in out[t]['joint'])},
+                            'schedule4_generators': len(own), 'share_sum_off_by_gt_2pct': len(bad_sum),
                             'examples': [list(k) for k in bad_sum[:10]]}
     tmp = OUT + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as fh:
