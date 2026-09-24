@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """extract_offerings.py - CapIQ 'Detailed Offerings' sheet -> data\\offerings.json
 
-The public-offerings history the Funding Gap board (tracker §4.3) needs. The sheet lives
-in the June/July-2026 workbook template (20 names) and was DROPPED from the 09-23 template,
-so this reads whatever workbooks carry it - pass a glob. Per ticker the newest workbook that
-has the sheet wins.
+The public-offerings history the Funding Gap board (tracker S4.3) needs. The sheet exists in
+the June/July-2026 workbooks for 20 names and in NO later pull: Fareen (2026-09-23) exported
+everything CapIQ offers on Detailed Offerings, so a name without the tab (AQN, CMS, GWRS, XIFR,
+AEP) is simply NOT AVAILABLE in CapIQ - not a pull gap, never ask for it again. This reads
+whatever workbooks carry the sheet (data\reports + _archive); newest per ticker wins, so the
+June/July vintage stays authoritative until CapIQ ships the tab again.
 
   python extract_offerings.py                       # default globs: data\\reports + data\\reports\\_archive
   python extract_offerings.py "E:\\path\\*.xlsx" ...  # explicit globs
@@ -197,6 +199,8 @@ def main():
     out['_coverage_warning'] = ('The offerings sheet is CapIQ deal-database coverage, NOT the filed financing: annual[y].offerings_debt_coverage_pct '
                                 'is the roll-up over the filed cash-flow Long-term Debt Issued (capiq_export.json cash_flow) and runs 0-99% by name/year. '
                                 'Use cf_lt_debt_issued_usd_m as the debt denominator; use rows[] for holdco/opco split, tenor, coupon and equity-event texture.')
+    out['_availability'] = ('20 of 25 names. AQN, CMS, GWRS, XIFR and AEP have no Detailed Offerings tab in CapIQ at all '
+                            '(Fareen exported everything available, 2026-09-23) - absence is a CapIQ limit, not a missing pull.')
     out['_note'] = ('Rows are as printed; annual{} is derived (see extract_offerings.py docstring): Priced only, USD only, '
                     'shelf registrations excluded, CapIQ announcement duplicates flagged duplicate_of. size_k is thousands of '
                     'issue currency. Funding-type filters differ by ticker pull - see filters{} per ticker before comparing names.')

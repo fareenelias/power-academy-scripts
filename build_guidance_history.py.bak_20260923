@@ -18,7 +18,6 @@ Usage:
   python3 scripts/build_guidance_history.py                 # all tickers, merge
   python3 scripts/build_guidance_history.py --tickers AEE,D # rebuild subset only
   python3 scripts/build_guidance_history.py --rebuild       # ignore existing file
-  python3 scripts/build_guidance_history.py --refresh-index --tickers AEP  # after build_corpus.py: re-project guidance_index.json, then build
 """
 import argparse, json, os, re, sys, tempfile, collections
 # Hardened dividend + equity extractors (2026-09-21): 29 controls, 10 tamper-proven
@@ -31,52 +30,6 @@ INDEX = os.path.join(BASE, 'guidance_index.json')
 TEXT  = os.path.join(BASE, 'data', 'corpus', 'text')
 OUT   = os.path.join(BASE, 'data', 'guidance_history.json')
 FLAG  = os.path.join(BASE, 'guidance_flagged.json')
-MANIFEST = os.path.join(BASE, 'data', 'corpus_manifest.json')
-
-
-def refresh_index():
-    """guidance_index.json is a projection of corpus_manifest.json: every earnings-call
-    presentation with a period and a date (2026-09-23: verified 419/419 ids identical to the
-    hand-built 08-06 file, then AEP's 16 decks were the only additions). Re-run after
-    build_corpus.py whenever a new name or quarter lands; the row shape is what build_row reads."""
-    docs = json.load(open(MANIFEST, encoding='utf-8'))['documents']
-    rows = []
-    for d in docs:
-        if d.get('doc_type') != 'presentation' or d.get('event') != 'earnings_call':
-            continue
-        if not d.get('period') or not d.get('date') or not d.get('tickers'):
-            continue
-        rows.append({'id': d['id'], 'ticker': d['tickers'][0], 'period': d['period'], 'date': d['date'],
-                     'title': d['title'], 'pages': d['pages'], 'words': d['words'], 'url': d['url'],
-                     'text': d['text_file']})
-    # One deck per ticker-period (build_row would abort on a collision). When the same call has
-    # several presentation PDFs (AEP files its financial-supplement tables as a second 'Earnings
-    # Call' deck) keep the longest, which is the slide deck, and say which one was set aside.
-    by_tp = collections.defaultdict(list)
-    for r in rows:
-        by_tp[(r['ticker'], norm_period(r['period']))].append(r)
-    kept = []
-    for (tk, pk), grp in sorted(by_tp.items()):
-        grp.sort(key=lambda r: (-(r['pages'] or 0), -(r['words'] or 0), r['id']))
-        kept.append(grp[0])
-        for r in grp[1:]:
-            print('  %s %s: set aside %s (%s pp) in favour of %s (%s pp)' %
-                  (tk, pk, r['url'].rsplit('/', 1)[-1], r['pages'], grp[0]['url'].rsplit('/', 1)[-1], grp[0]['pages']))
-    rows = kept
-    rows.sort(key=lambda r: (r['ticker'], r['date'], r['id']))
-    old = json.load(open(INDEX, encoding='utf-8')) if os.path.exists(INDEX) else []
-    old_ids = {r['id'] for r in old}
-    new_ids = {r['id'] for r in rows} | {r['id'] for g in by_tp.values() for r in g}
-    lost = old_ids - new_ids
-    if lost:
-        sys.exit('ABORT: refreshed guidance_index would drop %d existing deck(s) - is corpus_manifest.json complete?' % len(lost))
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(INDEX), suffix='.tmp')
-    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
-        json.dump(rows, fh, indent=1)
-    os.replace(tmp, INDEX)
-    gained = collections.Counter(r['ticker'] for r in rows if r['id'] not in old_ids)
-    print('guidance_index.json: %d decks (+%d: %s)' % (len(rows), sum(gained.values()),
-          ', '.join('%s %d' % kv for kv in sorted(gained.items())) or 'none'))
 
 PERIOD_RULE = ("Period key = '<Qn> <YYYY>' of the reporting period, not the call date. "
                "Manifest 'FY YYYY' rows are the Q4 YYYY call held the following February and are "
@@ -210,18 +163,6 @@ CAP_BAND = {   # consolidated multi-year plan totals only; guards segment/projec
 }
 
 CAP_RECIPES = {
- 'AEP': [   # 2026-09-23: surveyed all 16 decks Q4 2021-Q2 2026; Q4 2022 (Feb-2023) prints no plan total
-   (W + r'\s+Capital Forecast of\s+' + AMT + r'\s*B', hw('v')),                      # 2024-2028 Capital Forecast of $43B
-   (AMT + r'\s*B\s+(?:Updated\s+)?Capital Plan\s+' + W, hw('v')),                    # $78B Updated Capital Plan 2026-2030
-   (AMT + r'\s*B\s+' + W + r'\s+Capital Forecast', hw('v')),                          # $54B 2025-2029 Capital Forecast
-   (AMT + r'\s*B\s+capital plan from\s+' + W, hw('v')),                              # $43B capital plan from 2024-2028
-   (AMT + r'\s*B\s+capital plan for the\s+' + W + r'\s+forecast period', hw('v')),
-   (r'(?:5-year|five-year) capital plan of\s+' + AMT + r'\s*B', lambda m: {'value': float(m.group('v')),
-        'window': None, 'basis': 'printed'}),                                          # 5-year capital plan of $54B
-   (AMT + r'\s*B,?\s+(?:updated\s+|base\s+|conservative\s+)?(?:5-year\s+|five-year\s+)?capital plan\b',
-      lambda m: {'value': float(m.group('v')), 'window': None, 'basis': 'printed'}),   # $72B 5-year capital plan
-   (r'capital plan of\s+' + AMT + r'\s*B', lambda m: {'value': float(m.group('v')), 'window': None, 'basis': 'printed'}),
- ],
  'AEE': [
    (W + r'\s+capital plan(?: of)?\s+' + AMT + r'\s*(?:B\b|billion)', hw('v')),
    (AMT + r'(?:\s+\$\d{1,3}(?:\.\d)?\+?)?\s+(?:5-Year\s+)?Investment Plan\s+' + W, hw('v')),
@@ -652,13 +593,12 @@ def eps_guidance(tk, deck):  # noqa: C901
 # A refused match is SKIPPED, not fatal - scanning continues, so the slide's real
 # algorithm range (which has a clean gap) still lands.
 _LT_COLLIDE = re.compile(r'load\s+growth|dividend|payout|rate\s+base', re.I)
-_LT_MID = re.compile(r'shareholder\s+return|\bTSR\b', re.I)   # a TSR label between the range and the EPS word
 
 def lt_growth_scan(fb):
     """Per-text LT-EPS-growth scan; module-level so the controls can run on strings."""
     rx = (r'(?P<lo>\d{1,2}(?:\.\d)?)\s*%\s*(?:' + DASH + r'|to|-)\s*(?P<hi>\d{1,2}(?:\.\d)?)\s*%[^.%]{0,70}?'
-          r'(?:EPS|earnings per share|adjusted EPS|operating earnings)[^.%]{0,30}?(?:CAGR|growth)')
-    rx2 = (r'(?:EPS|earnings per share|operating earnings)[^.%]{0,40}?(?:CAGR|growth)[^.%]{0,40}?(?P<lo>\d{1,2}(?:\.\d)?)\s*%'
+          r'(?:EPS|earnings per share|adjusted EPS)[^.%]{0,30}?(?:CAGR|growth)')
+    rx2 = (r'(?:EPS|earnings per share)[^.%]{0,40}?(?:CAGR|growth)[^.%]{0,40}?(?P<lo>\d{1,2}(?:\.\d)?)\s*%'
            r'\s*(?:' + DASH + r'|to|-)\s*(?P<hi>\d{1,2}(?:\.\d)?)\s*%')
     for r_ in (rx, rx2):
         for m in re.finditer(r_, fb, re.I):
@@ -671,13 +611,7 @@ def lt_growth_scan(fb):
             # 6% ... EPS growth' must keep its true 4-6 match).
             cut = pre.rfind('%')
             if cut >= 0: pre = pre[cut + 1:]
-            # '... Rate Base CAGR through 2030 7%-9% Operating Earnings Growth': a clause that
-            # closes on a through-year belongs to the figure BEFORE it, not to ours (AEP 2026-09-23).
-            if re.search(r'\b(?:through|to|by)\s+(?:at least\s+)?20\d\d\W*$', pre, re.I): pre = ''
             if _LT_COLLIDE.search(pre): continue
-            # The range must not be labelled by a collide word BETWEEN it and the EPS word
-            # either ('~10%-12% Total Shareholder Return ... EPS growth of 6%-8%', AEP Q2 2025).
-            if _LT_MID.search(fb[m.end('hi'): m.end()]): continue
             seg = fb[max(0, m.start() - 140): m.end() + 160]
             by = re.search(r'(?:off|from|using|base(?:d)? (?:off|on)|vs\.?)[^.]{0,60}?(20\d\d)', seg)
             thru = re.search(r'through (?:at least )?(20\d\d)', seg)
@@ -709,9 +643,6 @@ _LT_CONTROLS = [
     ("Strong 5% to 7% adjusted EPS growth Expect dividend growth rate in line with EPS growth", (5.0, 7.0)),
     ("Expect 6% to 8% EPS CAGR from 2021-2025 Using 2021 EPS guidance midpoint", (6.0, 8.0)),
     ("Reaffirming adjusted EPS growth target of 4% to 6% through 2026 off the original 2023 adjusted EPS guidance midpoint of $3.65", (4.0, 6.0)),
-    # AEP 2026-09-23: TSR range printed ahead of the EPS range on the same slide; 'Operating Earnings Growth' wording
-    ("~10%-12% Total Shareholder Return \u2022 Targeted long-term operating EPS growth of 6%-8% \u2022 Dividend payout ratio of 55%-65%", (6.0, 8.0)),
-    ("$72B Capital Plan 2026-2030 ~10% Rate Base CAGR through 2030 7%-9% Annual Operating Earnings Growth Rate With an expected CAGR of greater than 9% through 2030", (7.0, 9.0)),
 ]
 
 def _run_lt_controls():
@@ -730,12 +661,9 @@ def rate_base(tk, deck):
     pats = [
       r'~?(?P<r>\d{1,2}(?:\.\d)?)\s*%\s*(?:compound annual )?rate base (?:CAGR|growth)[^.]{0,40}?' + W,
       r'rate base (?:CAGR|growth)[^.]{0,30}?' + W + r'[^.]{0,25}?~?(?P<r>\d{1,2}(?:\.\d)?)\s*%',
-      W + r'[^.%]{0,40}?rate base[^.%]{0,30}?CAGR[^.%]{0,20}?~?(?P<r>\d{1,2}(?:\.\d)?)\s*%',
+      W + r'[^.]{0,40}?rate base[^.]{0,30}?CAGR[^.]{0,20}?~?(?P<r>\d{1,2}(?:\.\d)?)\s*%',
       r'~?(?P<r>\d{1,2}(?:\.\d)?)\s*%\s*rate base CAGR\s*' + W,
     ]
-    # AEP prints '~10% Rate Base CAGR through 2030' beside a '$72B Capital Plan 2026-2030' label:
-    # rate + through-year only, window start taken from the plan window on the same slide.
-    thru = r'(?:~|Nearly |nearly |approximately |about )?(?P<r>\d{1,2}(?:\.\d)?)\s*%\s*rate base (?:CAGR|growth)\s*(?:CAGR\s*)?through\s+(?P<y>20\d\d)'
     for rx in pats:
         for pno, body in pages(pid):
             fb = flat(body)
@@ -746,20 +674,6 @@ def rate_base(tk, deck):
                 a, b = w.split('-')
                 return {'rate_pct': r, 'from_year': int(a), 'to_year': int(b), 'basis': 'printed',
                         'page': pno, 'text': fb[max(0, m.start() - 110): m.end() + 110]}
-    for pno, body in pages(pid):
-        fb = flat(body)
-        for m in re.finditer(thru, fb, re.I):
-            r = float(m.group('r')); y = int(m.group('y'))
-            if not (2 <= r <= 20): continue
-            w = slide_window(fb, m.start(), m.end())
-            if w and w.endswith(str(y)):
-                a = int(w.split('-')[0])
-                return {'rate_pct': r, 'from_year': a, 'to_year': y, 'basis': 'printed', 'page': pno,
-                        'note': 'window start %d read from the plan window printed on the same slide' % a,
-                        'text': fb[max(0, m.start() - 110): m.end() + 110]}
-            return {'rate_pct': r, 'from_year': y - 4, 'to_year': y, 'basis': 'derived', 'page': pno,
-                    'note': 'slide prints the rate and the through-year only; five-year window assumed (%d-%d)' % (y - 4, y),
-                    'text': fb[max(0, m.start() - 110): m.end() + 110]}
     return None
 
 def dividend(tk, deck):
@@ -1044,13 +958,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tickers', default=None, help='comma-separated subset to rebuild')
     ap.add_argument('--rebuild', action='store_true', help='ignore existing file (no merge)')
-    ap.add_argument('--refresh-index', action='store_true',
-                    help='rebuild guidance_index.json from data/corpus_manifest.json first (run after build_corpus.py)')
     args = ap.parse_args()
-    if args.refresh_index:
-        refresh_index()
 
-    idx = json.load(open(INDEX, encoding='utf-8'))
+    idx = json.load(open(INDEX))
     all_t = sorted({r['ticker'] for r in idx})
     want = [t.strip().upper() for t in args.tickers.split(',')] if args.tickers else all_t
     unknown = [t for t in want if t not in all_t]
@@ -1060,14 +970,14 @@ def main():
 
     before = {}
     if os.path.exists(OUT) and not args.rebuild:
-        before = json.load(open(OUT, encoding='utf-8'))
+        before = json.load(open(OUT))
     out = {k: v for k, v in before.items()}          # merge-only
     before_keys = {'%s|%s' % (t, p) for t, v in before.items() if not t.startswith('_')
                    for p in v if not p.startswith('_')}
 
     flagged = []
     if os.path.exists(FLAG) and not args.rebuild:
-        flagged = [f for f in json.load(open(FLAG, encoding='utf-8')) if f['ticker'] not in want]
+        flagged = [f for f in json.load(open(FLAG)) if f['ticker'] not in want]
 
     for tk in want:
         decks = sorted([r for r in idx if r['ticker'] == tk], key=lambda r: r['date'])
@@ -1115,7 +1025,7 @@ def main():
     # ---- QC overrides: hand-ruled cells survive every rebuild (2026-09-21) ----
     ov_path = os.path.join(BASE, 'data', 'guidance_qc_overrides.json')
     if os.path.exists(ov_path):
-        ov = json.load(open(ov_path, encoding='utf-8'))
+        ov = json.load(open(ov_path))
         applied = missing = 0
         for otk, pers in ov.items():
             if otk.startswith('_'):
@@ -1154,11 +1064,11 @@ def main():
         sys.exit('ABORT: refusing to write a file that drops existing keys.')
 
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(OUT), suffix='.tmp')
-    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+    with os.fdopen(fd, 'w') as fh:
         json.dump(out, fh, indent=1)
     os.replace(tmp, OUT)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(FLAG), suffix='.tmp')
-    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+    with os.fdopen(fd, 'w') as fh:
         json.dump(flagged, fh, indent=1)
     os.replace(tmp, FLAG)
     print('wrote %s (%d tickers) and %s (%d rows)' %

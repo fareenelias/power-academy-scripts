@@ -185,6 +185,7 @@ def build():
                 ('note', 'CapIQ deal-database coverage, not the filed financing - texture only; coverage_vs_filed_pct says how much of the filed LT debt it sees')])
         else:
             r['offerings'] = None
+            r['offerings_note'] = 'no Detailed Offerings tab for this name in CapIQ (not available, per 2026-09-23 export)'
         # the gap
         gp = collections.OrderedDict()
         cp = (r['capex_plan'] or {}).get('per_yr_b'); ip = (r['filed'] or {}).get('internal_per_yr_b'); hx = (r['filed'] or {}).get('external_per_yr_b')
