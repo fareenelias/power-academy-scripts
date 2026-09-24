@@ -56,13 +56,15 @@ def qparts(q):
 def build():
     g = load('guidance_history.json') or {}
     cq = (load('capiq_export.json') or {}).get('companies') or {}
+    ca_all = ((load('eps_actuals_company.json') or {}).get('tickers')) or {}   # company-reported FY adjusted EPS (Q4 call)
     out = collections.OrderedDict()
     out['_schema_version'] = '1.0'
     out['_generated'] = datetime.date.today().isoformat()
     out['_method'] = __doc__.split('Rules:')[1].split('  python')[0].strip()
-    out['_actuals_note'] = ("CapIQ 'EPS Normalized' FY actuals begin FY2023 in every workbook, so the track record "
-                            "covers guidance years 2023 onward; earlier vintages are kept in guidance_history but "
-                            "cannot be scored here. The in-flight year shows consensus, not an actual.")
+    out['_actuals_note'] = ("CapIQ 'EPS Normalized' FY actuals begin FY2023 in every workbook. Earlier years are scored only where "
+                            "data/eps_actuals_company.json holds the company's own Q4-call adjusted EPS (actual_basis=company_reported, with the "
+                            "transcript page); otherwise no_actual. Where both exist the company figure is a cross-check (>2c -> qc). "
+                            "The in-flight year shows consensus, not an actual.")
     out['_coverage_note'] = ("A name with no EPS guidance cells in guidance_history is either a non-EPS guider (VST/TLN guide EBITDA and FCF; "
                              "AWR/CWT/YORW/MSEX/GWRS print no EPS range) or an extractor gap - NEE prints adjusted-EPS 'expectations' ranges in "
                              "every deck and EIX prints core EPS guidance yearly, and neither is captured before 2026: that is the extractor, "
@@ -73,6 +75,7 @@ def build():
         co = cq.get(t) or {}
         actuals = ((co.get('eps_actuals_normalized') or {}).get('values')) or {}
         actuals = {str(k): v for k, v in actuals.items() if isinstance(v, (int, float))}
+        co_act = {str(k): v for k, v in (ca_all.get(t) or {}).items() if isinstance(v, dict) and isinstance(v.get('value'), (int, float))}
         per, eps = co.get('periods') or [], co.get('eps_diluted') or []
         consensus = {}
         for i, p in enumerate(per):
@@ -111,9 +114,17 @@ def build():
             rev = fin['midpoint'] - init['midpoint']
             row['revision'] = 'raised' if rev >= 0.01 else 'lowered' if rev <= -0.01 else 'held'
             row['revision_pct'] = round(100 * rev / init['midpoint'], 1) if init['midpoint'] else None
-            act = actuals.get(y)
+            act = actuals.get(y); ca = co_act.get(y)
+            if act is None and ca is not None:          # no CapIQ actual: the company's own Q4-call figure, labelled
+                act = ca['value']; basis_a = 'company_reported'
+            else:
+                basis_a = 'capiq_normalized'
+            if ca is not None:
+                row['actual_source'] = collections.OrderedDict((k, ca.get(k)) for k in ('value', 'source_folder', 'source_file', 'source_page', 'said'))
+                if basis_a == 'capiq_normalized' and act is not None and abs(act - ca['value']) > 0.02 + 1e-9:
+                    row['qc'] = 'CapIQ normalized $%.2f vs company-reported $%.2f (Q4 call p%s) - different adjusted basis; check before relying on the outcome' % (act, ca['value'], ca.get('source_page'))
             if act is not None:
-                row['actual'] = act; row['actual_basis'] = 'capiq_normalized'
+                row['actual'] = act; row['actual_basis'] = basis_a
                 d = act / init['midpoint'] - 1 if init['midpoint'] else None
                 row['delta_vs_initial_mid_pct'] = round(100 * d, 1) if d is not None else None
                 row['delta_vs_final_mid_pct'] = round(100 * (act / fin['midpoint'] - 1), 1) if fin['midpoint'] else None
@@ -135,7 +146,7 @@ def build():
                 row['outcome'] = 'in_flight'
                 row['consensus_vs_final_mid_pct'] = round(100 * (consensus[y] / fin['midpoint'] - 1), 1) if fin['midpoint'] else None
             else:
-                row['actual'] = None; row['outcome'] = 'no_actual'; row['note'] = 'no CapIQ normalized actual for this year (actuals begin FY2023)'
+                row['actual'] = None; row['outcome'] = 'no_actual'; row['note'] = 'no CapIQ normalized actual for this year (actuals begin FY2023) and no company-reported figure on file'
             if (t, y) in VERIFIED_REVISIONS and abs(row.get('revision_pct') or 0) >= 8:
                 row['revision_verified'] = VERIFIED_REVISIONS[(t, y)]
                 row['note'] = 'in-year revision of %s%% verified genuine: %s' % (row['revision_pct'], VERIFIED_REVISIONS[(t, y)])
@@ -144,8 +155,10 @@ def build():
                              'outlook-year column (the ETR Q4-2023 deck prints 24E guidance beside 25E/26E outlooks)' % row['revision_pct'])
             years[y] = row
         n = len(scored)
+        n_co = sum(1 for r in scored if r.get('actual_basis') == 'company_reported')
         summ = collections.OrderedDict([
             ('years_scored', n),
+            ('years_scored_on_company_actual', n_co),
             ('years_listed', len(years)),
             ('within_initial_range', sum(1 for r in scored if r['outcome'] == 'within')),
             ('above_initial_range', sum(1 for r in scored if r['outcome'] == 'above')),

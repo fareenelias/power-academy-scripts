@@ -26,6 +26,10 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ZIP = os.path.join(BASE, 'data', 'eia_cache', 'eia860.zip')
 IDMAP = os.path.join(BASE, 'data', 'eia_utility_id_map.json')
 OUT = os.path.join(BASE, 'data', 'fleet.json')
+Z923 = os.path.join(BASE, 'data', 'eia_cache', 'eia923_2024.zip')   # optional; v2 performance layer
+PERF_YEAR = 2024
+HOURS = 8784                  # 2024 is a leap year
+FOSSIL = {'Coal', 'Gas CC', 'Gas CT/recip', 'Gas steam', 'Oil'}
 AS_OF_YEAR = 2025            # data year of the EIA-860 file
 NOW = date.today().year
 
@@ -75,6 +79,54 @@ def yr(v):
     except (TypeError, ValueError):
         return None
 
+def perf923(pmcap):
+    """EIA-923 plant x prime-mover net generation / fuel -> per-ticker CF and heat rate by technology group."""
+    if not os.path.exists(Z923):
+        return {}, {'status': 'eia923 zip absent - performance layer skipped', 'path': Z923}
+    import openpyxl
+    z = zipfile.ZipFile(Z923)
+    nm = next(n for n in z.namelist() if re.search(r'Schedules_2_3_4_5', n))
+    wb = openpyxl.load_workbook(io.BytesIO(z.read(nm)), read_only=True)
+    ws = wb['Page 1 Generation and Fuel Data']
+    hdr = None; gen = collections.Counter(); fuel = collections.Counter()
+    for row in ws.iter_rows(values_only=True):
+        if hdr is None:
+            if row and row[0] == 'Plant Id':
+                hdr = [re.sub(r'\s+', ' ', str(c or '')).strip() for c in row]
+                iP, iPM = hdr.index('Plant Id'), hdr.index('Reported Prime Mover')
+                iG, iF = hdr.index('Net Generation (Megawatthours)'), hdr.index('Elec Fuel Consumption MMBtu')
+                iY = hdr.index('YEAR')
+            continue
+        if not row or row[0] in (None, ''): continue
+        if str(row[iY]).split('.')[0] != str(PERF_YEAR):
+            sys.exit('ABORT: EIA-923 row year %r is not %d' % (row[iY], PERF_YEAR))
+        k = (str(row[iP]).split('.')[0], str(row[iPM] or '').strip().upper())
+        gen[k] += num(row[iG]) or 0.0; fuel[k] += num(row[iF]) or 0.0
+    acc = collections.defaultdict(lambda: collections.defaultdict(lambda: {'mwh': 0.0, 'mw': 0.0, 'mmbtu': 0.0, 'n': 0}))
+    qc = collections.Counter(); over = []
+    for k, c in pmcap.items():
+        if not c['ts'] or c['mw'] <= 0: continue
+        if c['partial']: qc['excluded_part_year'] += 1; continue
+        if k not in gen: qc['no_923_row'] += 1; continue
+        g = c['tech'].most_common(1)[0][0]
+        cf = gen[k] / (c['mw'] * HOURS)
+        if cf > 1.0:
+            qc['excluded_cf_over_100'] += 1; over.append([k[0], k[1], round(100 * cf, 1)]); continue
+        for t in c['ts']:
+            a = acc[t][g]; a['mwh'] += gen[k]; a['mw'] += c['mw']; a['n'] += 1
+            if g in FOSSIL: a['mmbtu'] += fuel[k]
+        qc['plant_pm_used'] += 1
+    out = {}
+    for t, byg in acc.items():
+        out[t] = {'year': PERF_YEAR, 'by_tech': {}}
+        for g, a in sorted(byg.items(), key=lambda kv: -kv[1]['mw']):
+            e = {'mw_basis': round(a['mw'], 1), 'net_gen_gwh': round(a['mwh'] / 1000, 1),
+                 'cf_pct': round(100 * a['mwh'] / (a['mw'] * HOURS), 1) if a['mw'] else None, 'plant_pms': a['n']}
+            if g in FOSSIL and a['mwh'] > 0 and a['mmbtu'] > 0:
+                e['heat_rate_btu_kwh'] = round(1000 * a['mmbtu'] / a['mwh'])
+            out[t]['by_tech'][g] = e
+    return out, {'source': nm, 'counts': dict(qc), 'cf_over_100_examples': over[:10]}
+
 def main():
     import openpyxl
     idmap = json.load(open(IDMAP, encoding='utf-8'))
@@ -86,6 +138,18 @@ def main():
     z = zipfile.ZipFile(ZIP)
     gname = next(n for n in z.namelist() if re.match(r'3_1_Generator', n))
     wb = openpyxl.load_workbook(io.BytesIO(z.read(gname)), read_only=True)
+    # v2 (2026-09-24c): Schedule 4 ownership - jointly or third-party owned generators only.
+    # A generator absent from Schedule 4 is 100% owned by its operator.
+    oname = next(n for n in z.namelist() if re.match(r'4___Owner', n))
+    owb = openpyxl.load_workbook(io.BytesIO(z.read(oname)), read_only=True)
+    own = collections.defaultdict(list)          # (plant_code, gen_id) -> [(owner_id, frac, owner_name)]
+    for r in sheet_rows(owb, owb.sheetnames[0]):
+        f = num(r.get('Percent Owned'))
+        if f is None: continue
+        if f > 1.0001: f = f / 100.0            # guard: a file that prints percent, not fraction
+        own[(str(r.get('Plant Code')).split('.')[0], str(r.get('Generator ID')))].append(
+            (str(r.get('Ownership ID')).strip().split('.')[0], f, r.get('Owner Name')))
+    bad_sum = [k for k, v in own.items() if abs(sum(f for _, f, _ in v) - 1.0) > 0.02]
 
     out = {}
     def T(t):
@@ -95,18 +159,50 @@ def main():
                       'retiring': collections.defaultdict(collections.Counter),
                       'proposed': collections.defaultdict(collections.Counter),
                       'proposed_year': collections.defaultdict(collections.Counter),
-                      'retired': collections.defaultdict(collections.Counter), 'uprates': 0.0}
+                      'retired': collections.defaultdict(collections.Counter), 'uprates': 0.0,
+                      'owned': collections.Counter(), 'joint': []}
         return out[t]
 
+    pmcap = collections.defaultdict(lambda: {'mw': 0.0, 'tech': collections.Counter(), 'partial': False, 'ts': set()})
     for r in sheet_rows(wb, 'Operable'):
-        ts = uid2t.get(str(r.get('Utility ID')).strip().split('.')[0])
-        if not ts:
-            continue
         if not str(r.get('Status') or '').upper().startswith(('OP', 'SB', 'OS', 'OA')):
             continue
+        ts = uid2t.get(str(r.get('Utility ID')).strip().split('.')[0]) or set()
+        key = (str(r.get('Plant Code')).split('.')[0], str(r.get('Generator ID')))
         mw = num(r.get('Nameplate Capacity (MW)')) or 0.0
         g = group(r.get('Technology'))
+        # ownership share per coverage ticker (v2)
+        share = collections.Counter()
+        if key in own:
+            for oid, f, _ in own[key]:
+                for t in uid2t.get(oid, ()):
+                    share[t] += f
+        else:
+            for t in ts:
+                share[t] = 1.0
+        for t, f in share.items():
+            if f <= 0: continue
+            x = T(t); x['owned'][g] += mw * f
+            if key in own:
+                x['joint'].append({'plant': r.get('Plant Name'), 'plant_code': key[0], 'unit': key[1], 'state': r.get('State'),
+                                   'tech': g, 'mw': round(mw, 1), 'share_pct': round(100 * f, 1), 'owned_mw': round(mw * f, 1),
+                                   'operator': r.get('Utility Name'), 'operated_by_you': t in ts,
+                                   'co_owners': [{'name': n, 'pct': round(100 * ff, 1)} for oid, ff, n in own[key] if t not in uid2t.get(oid, ())]})
+        for t in ts:                      # operators with 0% ownership still appear in the operated view
+            if key in own and t not in share:
+                T(t)['joint'].append({'plant': r.get('Plant Name'), 'plant_code': key[0], 'unit': key[1], 'state': r.get('State'),
+                                      'tech': g, 'mw': round(mw, 1), 'share_pct': 0.0, 'owned_mw': 0.0,
+                                      'operator': r.get('Utility Name'), 'operated_by_you': True,
+                                      'co_owners': [{'name': n, 'pct': round(100 * ff, 1)} for _, ff, n in own[key]]})
+        if not ts:
+            continue
         oy = yr(r.get('Operating Year')); ry = yr(r.get('Planned Retirement Year'))
+        pm = str(r.get('Prime Mover') or '').strip().upper()
+        pmkey = (key[0], pm)
+        pmcap[pmkey]['mw'] += mw
+        pmcap[pmkey]['tech'][g] += mw
+        if oy and oy >= PERF_YEAR: pmcap[pmkey]['partial'] = True      # online during/after the performance year
+        pmcap[pmkey]['ts'] |= set(ts)
         for t in ts:
             x = T(t)
             x['operable'][g] += mw; x['units'] += 1
@@ -136,10 +232,14 @@ def main():
             if ey: x['proposed_year'][ey][g] += mw
 
     for r in sheet_rows(wb, 'Retired and Canceled'):
+        ryr = yr(r.get('Retirement Year'))
+        if ryr and ryr >= PERF_YEAR and str(r.get('Status') or '').upper().startswith('RE'):
+            # retired during/after the performance year: its 2024 generation sits in EIA-923 but its MW is not in 'Operable'
+            pk = (str(r.get('Plant Code')).split('.')[0], str(r.get('Prime Mover') or '').strip().upper())
+            pmcap[pk]['partial'] = True
         ts = uid2t.get(str(r.get('Utility ID')).strip().split('.')[0])
         if not ts:
             continue
-        ryr = yr(r.get('Retirement Year'))
         if not ryr or ryr < 2020 or not str(r.get('Status') or '').upper().startswith('RE'):
             continue     # 'CN' = canceled proposals, not retirements
         mw = num(r.get('Nameplate Capacity (MW)')) or 0.0
@@ -147,10 +247,11 @@ def main():
         for t in ts:
             T(t)['retired'][ryr][g] += mw
 
+    perf, perf_qc = perf923(pmcap)
     R = lambda v: round(v, 1)
     doc = {'_schema_version': 1, '_generated': date.today().isoformat(),
            '_source': 'EIA-860 %d EARLY RELEASE (%s), generator level' % (AS_OF_YEAR, gname),
-           '_caveats': ["Attribution is by OPERATOR (EIA-860 Utility ID): a jointly owned unit counts 100% to its operator and 0% to co-owners.",
+           '_caveats': ["Operated view (every figure except owned_*): attribution is by OPERATOR (EIA-860 Utility ID) - a jointly owned unit counts 100% to its operator and 0% to co-owners. owned_mw / owned_by_tech apply EIA-860 Schedule 4 ownership shares (a generator absent from Schedule 4 is 100% its operator's).",
                         "EIA's early release is 'inappropriate for aggregation' per EIA; company-level views are indicative.",
                         "Nameplate MW. Planned retirements are what the operator reported to EIA, which can lag IRP/filing announcements."],
            '_units': 'MW nameplate', 'as_of_year': AS_OF_YEAR, 'tickers': {}}
@@ -184,16 +285,27 @@ def main():
             'proposed_by_year': {str(y): {g: R(v) for g, v in c.most_common()} for y, c in sorted(x['proposed_year'].items())},
             'retired_since_2020': {str(y): {g: R(v) for g, v in c.most_common()} for y, c in sorted(x['retired'].items())},
             'retired_since_2020_mw': R(sum(sum(c.values()) for c in x['retired'].values())),
+            'owned_mw': R(sum(x['owned'].values())),
+            'owned_by_tech': {g: R(v) for g, v in x['owned'].most_common() if v >= 0.05},
+            'owned_minus_operated_mw': R(sum(x['owned'].values()) - tot),
+            'joint_units': sorted(x['joint'], key=lambda u: -(u['mw'] or 0)),
+            'perf': perf.get(t),
             'utility_ids': (idmap.get(t) or {}).get('utility_ids'),
         }
+    doc['_perf_qc'] = perf_qc
+    if perf:
+        doc['_caveats'].append("Capacity factor / heat rate: EIA-923 %d final, plant x prime-mover net generation over the EIA-860 %d nameplate of that plant's generators (operated view); plant-prime-movers with a unit added or retired in or after %d are excluded (part-year), as are any computing above 100%%. Heat rate = fuel MMBtu for electricity / net MWh, fossil only." % (PERF_YEAR, AS_OF_YEAR, PERF_YEAR))
+    doc['_ownership_qc'] = {'schedule4_generators': len(own), 'share_sum_off_by_gt_2pct': len(bad_sum),
+                            'examples': [list(k) for k in bad_sum[:10]]}
     tmp = OUT + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as fh:
         json.dump(doc, fh, indent=1)
     os.replace(tmp, OUT)
-    print('%-5s %9s %6s %6s %8s %8s %9s %8s' % ('TKR', 'MW', 'age', 'coal%', 'coalMW', 'coal-noRet', 'retire10y', 'proposed'))
+    print('%-5s %9s %9s %8s %6s %6s %8s %8s %9s %8s' % ('TKR', 'MW', 'ownedMW', 'delta', 'age', 'coal%', 'coalMW', 'coal-noRet', 'retire10y', 'proposed'))
     for t, v in doc['tickers'].items():
-        print('%-5s %9.0f %6s %6s %8.0f %8.0f %9.0f %8.0f' % (t, v['operable_mw'], v['avg_age_yrs'], v['coal']['share_pct'],
+        print('%-5s %9.0f %9.0f %8.0f %6s %6s %8.0f %8.0f %9.0f %8.0f' % (t, v['operable_mw'], v['owned_mw'], v['owned_minus_operated_mw'], v['avg_age_yrs'], v['coal']['share_pct'],
               v['coal']['operable_mw'], v['coal']['no_announced_retirement_mw'], v['retiring_next10_mw'], v['proposed_mw']))
+    print('ownership QC:', doc['_ownership_qc'])
     print('wrote', OUT)
 
 if __name__ == '__main__':
