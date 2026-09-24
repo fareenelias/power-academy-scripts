@@ -44,7 +44,6 @@ COMPANIES = {
     "HE":   {"name":"Hawaiian Electric",         "type":"electric", "subsidiaries":["Hawaiian Electric","Hawaii Electric Light","Maui Electric"]},
     "EVRG": {"name":"Evergy",                    "type":"electric", "subsidiaries":["Evergy Metro","Evergy Kansas Central","Westar Energy","Kansas City Power & Light","KCP&L"]},
     "ES":   {"name":"Eversource Energy",         "type":"electric", "subsidiaries":["Public Service of New Hampshire","PSNH","Connecticut Light and Power","CL&P","NSTAR Electric","Western Massachusetts Electric","Eversource Energy","Yankee Gas","Northern Utilities"]},
-    "AEP":  {"name":"American Electric Power",   "type":"electric", "subsidiaries":["Appalachian Power","Indiana Michigan Power","Ohio Power","Public Service Co of Oklahoma","Southwestern Electric Power","AEP Texas","Kentucky Power","Kingsport Power","Wheeling Power","AEP Generation Resources"]},
     "VST":  {"name":"Vistra Energy",             "type":"ipp",      "subsidiaries":["Luminant","TXU Energy","Vistra","Dynegy"]},
     "TLN":  {"name":"Talen Energy",             "type":"ipp",      "subsidiaries":["Talen Energy","PPL Susquehanna","Susquehanna Nuclear","Montour","Brunner Island","Martins Creek","Raven Power","H.A. Wagner","C.P. Crane","Brandon Shores","Talen Montana","Colstrip","Jade Renewable","Sapphire Sky"]},
     "XIFR": {"name":"XPLR Infrastructure",       "type":"yieldco",  "subsidiaries":["NextEra Energy Partners","XPLR Infrastructure","NEP","Genesis Solar","Mountain Wind","Duane Arnold","Jericho Rise"]},
@@ -66,21 +65,6 @@ KNOWN_IDS = {
     "EVRG": ["10000","18973"], "ES":   ["15350","3786","13524","20382"],
     "VST":  ["56798","57410"], "TLN":  ["57868", "57869", "14610", "14611", "57870"],
     "XIFR": ["57821"],
-}
-
-# 2026-09-24: name matching alone let co-ops in ('Union Electric Membership Corp' matched
-# 'Union Electric') and missed opcos whose EIA spelling differs ('Louisville Gas & Electric'
-# vs 'Louisville Gas and Electric'). Every run now UNIONS the name matches with the verified
-# retail-utility IDs from slice_territories_by_id.WHITELIST (ID + NAME checked against the
-# HIFLD/EIA-861 file) and DROPS the known false matches below. Name matching stays because
-# the generation entities (NEER, Vistra, Talen, XPLR project LLCs) are not in the whitelist.
-try:
-    from slice_territories_by_id import WHITELIST as _TERR_WHITELIST
-    PINNED_IDS = {t: list(v[1]) for t, v in _TERR_WHITELIST.items()}
-except Exception as _e:          # never run silently without the pins
-    raise SystemExit(f"slice_territories_by_id.WHITELIST not importable ({_e}) - run from the scripts folder")
-DENY_IDS = {
-    "AEE": {"3716": "Clay-Union Electric Corp (SD co-op)", "19435": "Union Electric Membership Corp (NC co-op)"},
 }
 
 TECH_COLORS = {
@@ -365,17 +349,6 @@ def load_eia861_territories_xlsx() -> dict:
     return territories
 
 def build_territory_geojson_from_xlsx(ticker, match, territories):
-    # 2026-09-24: files that carry POLYGONS (slice_territories_by_id.py) are never replaced -
-    # this function only writes state-list stubs with features: [], and it used to overwrite
-    # every polygon file on each run (the map went blank after the 09-24 run).
-    _tp = TERR_DIR / f"{ticker}.geojson"
-    if _tp.exists():
-        try:
-            if json.loads(_tp.read_text(encoding="utf-8")).get("features"):
-                log.info(f"{ticker}: territory polygons present - left untouched")
-                return
-        except Exception:
-            pass
     """
     Build GeoJSON using state-level approximation from xlsx territory data.
     Note: exact polygon shapefiles require EIA 861 shapefile edition (older years).
@@ -442,7 +415,7 @@ def match_companies(gen_df: pd.DataFrame, territories: dict) -> dict:
             "corps of engineers", "army corps", "usce", "bureau of reclamation",
             "tva", "bonneville", "western area power", "southwestern power",
             "southeastern power", "coop", "cooperative", "municipal", "city of",
-            "town of", "county of", "rural electric", "membership corp",
+            "town of", "county of", "rural electric",
         ]
 
         for uid, uname in gen_utils.items():
@@ -455,15 +428,6 @@ def match_companies(gen_df: pd.DataFrame, territories: dict) -> dict:
                     if uid not in matched_ids:
                         matched_ids.append(uid); matched_names.append(uname)
                     break
-
-        for did in DENY_IDS.get(ticker, {}):
-            if did in matched_ids:
-                i = matched_ids.index(did); matched_ids.pop(i); matched_names.pop(i)
-        pinned_added = [pid for pid in PINNED_IDS.get(ticker, []) if pid not in matched_ids]
-        for pid in pinned_added:
-            matched_ids.append(pid); matched_names.append(gen_utils.get(pid, _TERR_WHITELIST[ticker][1][pid]))
-        if pinned_added:
-            log.info(f"{ticker}: + pinned IDs not found by name: {pinned_added}")
 
         if not matched_ids and ticker in KNOWN_IDS:
             for kid in KNOWN_IDS[ticker]:
