@@ -74,12 +74,7 @@ LIBRARY_ROOT = (os.path.join(ROOT, 'Documents', 'library'), 'library')
 # documents. Indexing the bundles would return every broker note twice, once under a
 # title like `Scans-20260729` carrying no ticker and no date. The stray guard below
 # knows about these so they are reported as staging, not as an accident.
-# data\Infralogic (added 2026-09-24): Infralogic xlsx exports (raw inputs to the sponsor
-# JSONs) + 15 sponsor-side PDFs (Infralogic GP profiles, sponsor annual reports / earnings
-# decks / transcripts). None belongs to a coverage ticker and the corpus assumes every
-# document does, so it is staging for now; the PDFs are the seed of a future
-# sponsor-documents root when the sponsor layer gets a Documents view.
-STAGING_DIRS = [os.path.join(ROOT, 'data', 'Scans'), os.path.join(ROOT, 'data', 'Infralogic')]
+STAGING_DIRS = [os.path.join(ROOT, 'data', 'Scans')]
 
 # ── ticker resolution ────────────────────────────────────────────────────────
 # Coverage (24) + the peer names that appear in the presentation set. Longest key

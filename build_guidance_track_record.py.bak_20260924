@@ -34,15 +34,6 @@ DATA_DIR = r'E:\PowerAcademy\data' if os.name == 'nt' else \
 SPLITS = {'ETR': ('2024-12-13', 2.0), 'NEE': ('2020-10-26', 4.0)}   # effective date, ratio
 
 
-
-# In-year revisions >=8% that were CHECKED on the deck page and are real raises/cuts, not
-# outlook-column captures (2026-09-24 QC of the six '?' rows: CMS 2023/24, ETR 2024 and
-# PCG 2024/25 were capture errors, fixed in guidance_history via the extractor year rule
-# and guidance_qc_overrides.json; HTO 2023 is the one genuine revision).
-VERIFIED_REVISIONS = {
-    ('HTO', '2023'): 'SJW Q3 2023 deck p4 - "Guidance range increased for 2023: $2.65 to $2.70" (from $2.40-$2.50)',
-}
-
 def load(name):
     p = os.path.join(DATA_DIR, name)
     return json.load(io.open(p, encoding='utf-8')) if os.path.exists(p) else None
@@ -136,10 +127,7 @@ def build():
                 row['consensus_vs_final_mid_pct'] = round(100 * (consensus[y] / fin['midpoint'] - 1), 1) if fin['midpoint'] else None
             else:
                 row['actual'] = None; row['outcome'] = 'no_actual'; row['note'] = 'no CapIQ normalized actual for this year (actuals begin FY2023)'
-            if (t, y) in VERIFIED_REVISIONS and abs(row.get('revision_pct') or 0) >= 8:
-                row['revision_verified'] = VERIFIED_REVISIONS[(t, y)]
-                row['note'] = 'in-year revision of %s%% verified genuine: %s' % (row['revision_pct'], VERIFIED_REVISIONS[(t, y)])
-            elif abs(row.get('revision_pct') or 0) >= 8 and row.get('outcome') not in ('basis_mismatch',):
+            if abs(row.get('revision_pct') or 0) >= 8 and row.get('outcome') not in ('basis_mismatch',):
                 row['qc'] = ('in-year revision of %s%% - verify on the initial vintage\'s page that the range is this year\'s guidance and not an '
                              'outlook-year column (the ETR Q4-2023 deck prints 24E guidance beside 25E/26E outlooks)' % row['revision_pct'])
             years[y] = row

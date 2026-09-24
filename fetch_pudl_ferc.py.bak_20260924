@@ -69,11 +69,6 @@ COVERAGE_OPCOS = {
              "Greater Missouri", "Evergy Missouri West"],
     "ES":   ["Connecticut Light and Power", "NSTAR Electric",
              "Public Service Company of New Hampshire"],
-    # 2026-09-24: AEP (25th coverage name). AEP Texas resolves by id closure across the 2016
-    # merger: 198 AEP Texas Central + 199 AEP Texas North -> 372 AEP Texas Inc.
-    "AEP":  ["Appalachian Power", "Indiana Michigan Power", "Ohio Power",
-             "Public Service Company of Oklahoma", "Southwestern Electric Power",
-             "AEP Texas", "Kentucky Power", "Kingsport Power", "Wheeling Power"],
 }
 
 EXCLUDE_FILERS = ["Westar Generating"]
@@ -121,18 +116,6 @@ ONE_TIME_FLAGS = {
     },
     "entergylouisiana": {
         "2020": "Single-year NI spike ($691M->$1,082M; TCJA/storm regulatory items). Elevated vs run-rate.",
-    },
-    # 2026-09-21 flags (08-02 audit), moved here 2026-09-24 so a rebuild cannot drop them -
-    # they previously existed ONLY in ferc_opco.json and a --build would have erased them.
-    "pacificgasandelectric": {
-        "2020": "Earned 2.54% vs ~10.25% CPUC authorized - the Chapter 11 emergence year (Jul 2020); wildfire-era charges depress standalone NI. A real result, not a filer-matching error. Flagged 2026-09-21 per the 08-02 audit.",
-        "2021": "Earned -0.97%: wildfire-era charges (incl. Dixie) drive negative standalone NI. A real result, not a filer-matching error. Flagged 2026-09-21 per the 08-02 audit.",
-    },
-    "greatermissourioperations": {
-        "2024": "GMO earns 2.99-7.36% across all filed years vs ~9.5% MO authorized - either persistent structural under-earning at this opco or a filer-matching artifact (utility_id 255); unresolved. Flagged 2026-09-21 per the 08-02 audit.",
-    },
-    "wheelingpower": {
-        "2023": "Earned -9.2% vs 6.7-8.4% in the adjacent years - an unexplained single-year swing; verify against the Form 1 before citing. Flagged 2026-09-24 on AEP onboarding.",
     },
     "narragansett": {
         "2022": "PPL closed the Rhode Island (Narragansett) acquisition May 2022 -> transition/partial year "

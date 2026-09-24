@@ -597,81 +597,11 @@ def capital_plan(tk, deck):
 EPS_RANGE = re.compile(r'\$\s?(?P<lo>\d{1,2}\.\d{2})\s*(?:%s|to)\s*\$?\s?(?P<hi>\d{1,2}\.\d{2})' % DASH)
 SEGMENT = re.compile(r'(?i)(virginia|south carolina|contracted energy|segment|subsidiar|opco|by business|'
                      r'kentucky|pennsylvania|rhode island|ameren missouri|ameren illinois)')
-# REFERENCE-RANGE GUARD (2026-09-24). EIX prints, on the same key-messages slide as
-# its live guidance, the range a CAGR is MEASURED FROM ("based on the midpoint of the
-# initial 2021 EPS guidance range of $4.42-4.62") or a range DERIVED from a target
-# ("would result in 2025 EPS of $5.50-5.90"). Equal score + same slide -> the tie
-# guard refused, and 19 of 21 EIX vintages stored nothing. A range introduced this
-# way is a reference, not this vintage's guidance: pushed down hard.
-# A bare 'midpoint of 2022 EPS guidance range of' is NOT a reference - AEE's footnotes
-# describe the live range that way - so 'original' / 'initial' is required (an
-# out-year range introduced as a midpoint is caught by the year binding instead).
-_EPS_REF = re.compile(r'(?i)(?:(?:original|initial) (?:20\d\d )?(?:core |adjusted )?EPS guidance range'
-                      r'|based (?:on )?(?:the )?midpoint of (?:the )?(?:20\d\d )?(?:core |adjusted )?EPS guidance range'
-                      r'|would result in (?:20\d\d )?(?:core |adjusted )?EPS of'
-                      r'|starting point of)[^$]{0,25}$')
-def _eps_own_year(fb, s, e):
-    """The year a range is GRAMMATICALLY bound to, or None: '$6.74-7.14 (2028)' or
-    '2027 Core EPS guidance of $6.25-6.65'. Deliberately narrow - the first cut read
-    the nearest year on the slide and that year is usually layout noise ('$4.39 -
-    $4.49 2020 EPS of $3.84', '$1.75 to $1.80 2021 - 2024', a column header two
-    cells away); the regression scan caught it wiping 10 correct AWK/PCG/WTRG cells."""
-    m = re.match(r'\s*\((20[2-3]\d)\)', fb[e:e + 9])
-    if m: return int(m.group(1))
-    # trailing label: 'Introduced $4.75-5.05 2024 Core EPS Guidance' (EIX key-messages tiles)
-    m = re.match(r'\s*(20[2-3]\d)\s+(?:core |adjusted |operating |diluted )?(?:EPS|earnings per share)\d?\s+guidance',
-                 fb[e:e + 50], re.I)
-    if m: return int(m.group(1))
-    m = re.search(r'\b(20[2-3]\d)\s+(?:core |adjusted |operating |diluted )?(?:EPS|earnings per share)\d?\s+'
-                  r'guidance(?:\s+(?:of|to|at|range(?:\s+(?:of|for))?))?\s*$', fb[max(0, s - 70):s], re.I)
-    return int(m.group(1)) if m else None
-
-# YEAR-HEADER TABLE FALLBACK (2026-09-24). NEE prints guidance ONLY as an
-# 'Adjusted EPS Expectations' table - '2024 2025E 2026E 2027E ... $3.45-$3.70
-# $3.63-$4.00 $3.85-$4.32' - with no 'guidance' word, so the scorer dropped every
-# candidate and NEE had zero EPS cells. The text order of the cells is NOT reliable
-# (Q3 2021 extracts 2023E first), so ranges are ordered by value: an expectations
-# table rises year on year, and the guard below refuses any table where that is not
-# strictly true. Only the FIRST estimate column is stored (the vintage's guidance
-# year); it must be fy or fy+1. Used only when the scorer found nothing at all.
-_EPS_TABLE_PAGE = re.compile(r'(?i)(?:EPS|earnings per share|financial) expectations')
-_EPS_TABLE_HDR = re.compile(r'\b20[2-3]\d\s+((?:20[2-3]\dE\s*){1,6})')
-def eps_table(fb, fy):
-    if not _EPS_TABLE_PAGE.search(fb): return None
-    h = _EPS_TABLE_HDR.search(fb)
-    if not h: return None
-    eyrs = [int(y) for y in re.findall(r'(20[2-3]\d)E', h.group(1))]
-    if not eyrs or eyrs[0] not in (fy, fy + 1): return None
-    rngs = []
-    for m in EPS_RANGE.finditer(fb, h.end()):
-        if re.search(r'(?i)range of\s*$', fb[max(0, m.start() - 20):m.start()]): continue  # footnote ('2024 adjusted EPS range of ...')
-        lo, hi = float(m.group('lo')), float(m.group('hi'))
-        if not (0.2 <= lo < hi <= 30) or (hi - lo) > 0.35 * lo: continue
-        if (lo, hi) not in rngs: rngs.append((lo, hi))
-    if not rngs or len(rngs) > len(eyrs): return None
-    rngs.sort()
-    if any(not (b[0] > a[0] and b[1] > a[1]) for a, b in zip(rngs, rngs[1:])): return None
-    lo, hi = rngs[0]
-    return {'year': str(eyrs[0]), 'low': lo, 'high': hi, 'midpoint': round((lo + hi) / 2.0, 4),
-            'basis': 'printed', 'table': list(zip(eyrs, rngs)),
-            'text': fb[max(0, h.start() - 130): h.end() + 160]}
-
-# Tickers that do not guide EPS at all. XIFR (NextEra Energy Partners, an LP) guides
-# distributions per unit; its 2021-24 decks are JOINT NEE/NEP decks that carry NEE's
-# 'Adjusted EPS Expectations' table - the table fallback would store NEE's EPS as
-# XIFR's (14 cells, caught by the 2026-09-24 regression scan).
-NO_EPS_GUIDANCE = {'XIFR': "guides distributions per unit, not EPS; joint NEE/NEP decks carry NEE's EPS table"}
-
 def eps_guidance(tk, deck):  # noqa: C901
     """All $X.XX-$Y.YY ranges in the deck, scored on their slide context. The
     highest-scoring one wins; ties go to the earliest slide (headline guidance
     is printed early). Segment-level EPS ranges are pushed down hard - that is
-    exactly how a wrong-but-plausible EPS cell gets created. Reference ranges
-    (a CAGR base, a derived out-year figure) and ranges labelled with a year other
-    than fy / fy+1 are pushed down too (2026-09-24). A year-header expectations
-    table is the fallback when nothing scores (2026-09-24)."""
-    if tk in NO_EPS_GUIDANCE:
-        return None
+    exactly how a wrong-but-plausible EPS cell gets created."""
     fy = int(deck['period'].split()[-1])
     cands = []
     for pno, body in pages(deck['id']):
@@ -687,35 +617,14 @@ def eps_guidance(tk, deck):  # noqa: C901
             if re.search(r'(?i)EPS|earnings per share|per diluted share|per share', pre[-130:] + post[:60]): sc += 2
             if re.search(r'(?i)dividend|DPS|rate base|revenue|O&M|capital', pre[-60:]): sc -= 5
             if SEGMENT.search(pre[-110:]): sc -= 5
-            if _EPS_REF.search(pre[-120:]): sc -= 6
-            own = _eps_own_year(fb, m.start(), m.end())
-            if own is not None and own > fy + 1: sc -= 6   # an out-year target (fy+2 on), not this vintage's guidance
             if sc <= 2:
                 continue
-            if own in (fy, fy + 1):
-                yr = str(own)
-            else:
-                # NEAREST fy/fy+1 year to the range, not the last one in the window (2026-09-24):
-                # 'EPS 2023 $1.19-$1.23 Up at least 10% $0 2024 Up at least 10%' is 2023's range
-                # (PCG Q1-Q3 2023 were labelled 2024); '$1.33 - $1.37 2024 Guidance ... 2025' is 2024's.
-                win_ = pre[-90:] + ' ' + post[:60]; at = len(pre[-90:])
-                yrs = [(min(abs(ym.start() - at), abs(ym.end() - at)), ym.group(1))
-                       for ym in re.finditer(r'\b(20[2-3]\d)\b', win_) if int(ym.group(1)) in (fy, fy + 1)]
-                # ...except a Q4 deck, whose guidance range is next year's by convention: fy+1 wins
-                # when it is in the window ('$2.90 - $3.00 2024 Adjusted EPS 2025 Guidance', HTO Q4 2024).
-                if deck['period'].split()[0] in ('Q4', 'FY') and any(int(y) == fy + 1 for _, y in yrs):
-                    yr = str(fy + 1)
-                else:
-                    yr = min(yrs)[1] if yrs else None
-            cands.append(((sc, -pno), {'year': yr, 'low': lo, 'high': hi,
+            yrs = [y for y in re.findall(r'\b(20[2-3]\d)\b', pre[-90:] + ' ' + post[:60])
+                   if int(y) in (fy, fy + 1)]
+            cands.append(((sc, -pno), {'year': yrs[-1] if yrs else None, 'low': lo, 'high': hi,
                                        'midpoint': round((lo + hi) / 2.0, 4), 'basis': 'printed', 'page': pno,
                                        'text': fb[max(0, m.start() - 130): m.end() + 90]}))
     if not cands:
-        for pno, body in pages(deck['id']):
-            t = eps_table(flat(body), fy)
-            if t:
-                t['page'] = pno
-                return t
         return None
     cands.sort(key=lambda c: c[0], reverse=True)
     top = cands[0]
@@ -728,65 +637,6 @@ def eps_guidance(tk, deck):  # noqa: C901
         return {'ambiguous': [(c[1]['low'], c[1]['high']) for c in [top] + rivals][:4],
                 'page': top[1]['page'], 'text': top[1]['text']}
     return top[1]
-
-# Embedded EPS controls (2026-09-24) - REAL slide texts. Runs at import; a failure
-# refuses the build. Each is (period, text, expected (year, lo, hi) or None).
-_EPS_CONTROLS = [
-    # EIX Q3 2021: live narrowed range beside the CAGR-base reference range
-    ('Q3 2021', "Compound annual growth rate (CAGR) based on the midpoint of the initial 2021 EPS guidance range of $4.42–4.62 November 2, 2021 EIX narrows 2021 core EPS guidance to $4.42–4.52", ('2021', 4.42, 4.52)),
-    # EIX Q4 2024: revised guidance + CAGR base + a (2028) out-year figure on one slide
-    ('Q4 2024', "Revised $5.94–6.34 2025 Core EPS Guidance1 2. Compound annual growth rate (CAGR) based on the midpoint of the original 2025 EPS guidance range of $5.50–5.90 plus run-rate interest expense reduction of 14¢ Continued confidence in delivering 5–7% Core EPS1 growth from $5.84 (2025) to $6.74–7.14 (2028)", ('2025', 5.94, 6.34)),
-    # EIX Q4 2025: next-year guidance beside the year-after (fy+2) guidance
-    ('Q4 2025', "Introduced 2026 Core EPS1 guidance of $5.90–6.20 and 2027 Core EPS guidance of $6.25–6.65 1. See Earnings Per Share", ('2026', 5.90, 6.20)),
-    # EIX Q2 2023: derived 2025 figure must not win over live 2023 guidance
-    ('Q2 2023', "EIX reaffirms 2023 core EPS guidance of $4.55–4.85 EIX reaffirms 5–7% 2021–2025 EPS growth rate target, which would result in 2025 EPS of $5.50–5.90", ('2023', 4.55, 4.85)),
-    # NEE Q4 2024 table: footnote range skipped, first estimate column stored
-    ('Q4 2024', "Adjusted Earnings Per Share Expectations 2. 2024 adjusted EPS range of $3.23 - $3.43 2024 2025E 2026E 2027E $3.43 6% - 8% off 2024 adjusted EPS range2 $3.45 – $3.70 $3.63 – $4.00 $3.85 – $4.32", ('2025', 3.45, 3.70)),
-    # NEE Q3 2021 table: cells extract out of order - value order decides
-    ('Q3 2021', "NextEra Energy’s Adjusted Earnings Per Share Expectations 2020 2021E 2022E 2023E • Expect adjusted EPS growth in the range of 6% to 8% $2.77 - $2.97 We will be disappointed $2.55 - $2.75 $2.40 - $2.54 $2.31", ('2021', 2.40, 2.54)),
-    # NEE Q4 2025 table: one range, first estimate column
-    ('Q4 2025', "NextEra Energy’s Financial Expectations1 2025 2026E 2030E 2032E 2035E $3.92–$4.02 $3.71 8%+ Long-term Expectations2", ('2026', 3.92, 4.02)),
-    # table guard: nested ranges (not a year-on-year rising table) are refused
-    ('Q4 2024', "Financial Expectations 2024 2025E 2026E $3.40 – $4.20 $3.60 – $3.90", None),
-    # table guard: header whose first estimate year is not the guidance year
-    ('Q4 2024', "Financial Expectations 2027 2028E 2029E $3.45 – $3.70 $3.63 – $4.00", None),
-    # AEE Q4 2021: a footnote naming the LIVE range's midpoint is not a reference
-    ('Q4 2021', "Represents midpoint of 2022 EPS guidance range of $3.95 to $4.15. 3 Unrounded dividends", ('2022', 3.95, 4.15)),
-    # EIX Q3 2023: an out-year range introduced as a midpoint loses to the live guidance
-    ('Q3 2023', "EIX reaffirms 2023 core EPS guidance of $4.55\u20134.85 1. For 2025, represents the midpoint of the 2025 core EPS guidance range for $5.50\u20135.90 $5.70", ('2023', 4.55, 4.85)),
-    # EIX Q1 2024: a fy+1 range that is only a CAGR base does not tie with the live guidance
-    ('Q1 2024', "Affirmed $4.75\u20135.05 2024 Core EPS Guidance1 3. Compound annual growth rate (CAGR) based on the midpoint of the 2025 EPS guidance range of $5.50\u20135.90 2 4", ('2024', 4.75, 5.05)),
-    # EIX Q4 2023: the guidance year is the trailing tile label, not the deck year
-    ('Q4 2023', "$4.76 2023 Core EPS1 Reiterated 5\u20137% Core EPS CAGR 2025\u201320283 Introduced $4.75\u20135.05 2024 Core EPS Guidance1 2023 Core EPS above midpoint", ('2024', 4.75, 5.05)),
-    # table guard: more ranges than estimate columns (a footnote/segment range leaked in) is refused
-    ('Q4 2024', "Financial Expectations 2024 2025E 2026E $3.45 \u2013 $3.70 $3.63 \u2013 $4.00 $3.85 \u2013 $4.32", None),
-    # PCG Q1 2023: the year label nearest the range wins, not the last year in the window
-    ('Q1 2023', "Reaffirming 2023 Guidance EPS New Equity 2023 $1.19-$1.23 Up at least 10% $0 2024 Up at least 10% $0", ('2023', 1.19, 1.23)),
-    # HTO Q4 2024: in a Q4 deck fy+1 wins over an adjacent prior-year label
-    ('Q4 2024', "anchored off 2022 reported EPS of $2.43 $2.90 - $3.00 2024 Adjusted EPS 2025 Guidance Adjusted", ('2025', 2.90, 3.00)),
-    # unchanged behaviour: a plain headline guidance range still extracts
-    ('Q2 2021', "Re-affirming full year 2021 EPS guidance of $2.70 to $2.85 per diluted share", ('2021', 2.70, 2.85)),
-]
-
-def _run_eps_controls():
-    for i, (per, txt, want) in enumerate(_EPS_CONTROLS):
-        pid = '__eps_ctl_%d' % i
-        _pc[pid] = [(1, txt)]
-        try:
-            got = eps_guidance('CTL', {'id': pid, 'period': per})
-        finally:
-            _pc.pop(pid, None)
-        trip = None if (not got or got.get('ambiguous')) else (got['year'], got['low'], got['high'])
-        assert trip == want, 'EPS CONTROL %d FAILED: %r -> %r, want %r' % (i, txt[:60], trip, want)
-    # XIFR gate: NEE's own table (control 4 text) must NOT extract under XIFR
-    _pc['__eps_ctl_x'] = [(1, _EPS_CONTROLS[4][1])]
-    try:
-        got = eps_guidance('XIFR', {'id': '__eps_ctl_x', 'period': 'Q4 2024'})
-    finally:
-        _pc.pop('__eps_ctl_x', None)
-    assert got is None, 'EPS CONTROL XIFR FAILED: NEE table extracted under XIFR -> %r' % (got,)
-
-_run_eps_controls()
 
 
 # LOAD-GROWTH COLLISION GUARD (2026-09-21b). The drift layer caught three POR cells
@@ -804,15 +654,13 @@ _run_eps_controls()
 _LT_COLLIDE = re.compile(r'load\s+growth|dividend|payout|rate\s+base', re.I)
 _LT_MID = re.compile(r'shareholder\s+return|\bTSR\b', re.I)   # a TSR label between the range and the EPS word
 
-def lt_growth_scan(fb, passes=(1, 2)):
-    """Per-text LT-EPS-growth scan; module-level so the controls can run on strings.
-    pass 1 = range BEFORE the EPS word ('6% to 8% EPS CAGR 2026-2030'); pass 2 = EPS word
-    first ('EPS growth ... near upper end of 6% to 8%'), the looser form."""
+def lt_growth_scan(fb):
+    """Per-text LT-EPS-growth scan; module-level so the controls can run on strings."""
     rx = (r'(?P<lo>\d{1,2}(?:\.\d)?)\s*%\s*(?:' + DASH + r'|to|-)\s*(?P<hi>\d{1,2}(?:\.\d)?)\s*%[^.%]{0,70}?'
           r'(?:EPS|earnings per share|adjusted EPS|operating earnings)[^.%]{0,30}?(?:CAGR|growth)')
     rx2 = (r'(?:EPS|earnings per share|operating earnings)[^.%]{0,40}?(?:CAGR|growth)[^.%]{0,40}?(?P<lo>\d{1,2}(?:\.\d)?)\s*%'
            r'\s*(?:' + DASH + r'|to|-)\s*(?P<hi>\d{1,2}(?:\.\d)?)\s*%')
-    for r_ in [x for i, x in ((1, rx), (2, rx2)) if i in passes]:
+    for r_ in (rx, rx2):
         for m in re.finditer(r_, fb, re.I):
             lo, hi = float(m.group('lo')), float(m.group('hi'))
             if not (0 < lo < hi <= 20): continue
@@ -841,10 +689,6 @@ def lt_growth_scan(fb, passes=(1, 2)):
     return None
 
 def lt_growth(tk, deck):
-    # NOTE 2026-09-24: 'pass 1 across the whole deck before pass 2' was tried and REVERTED -
-    # it restored AEE's window (p17 '6% to 8% EPS CAGR 2026-2030') but cost POR 3 cells and
-    # D 1 cell their base/through years (rates identical in all 136). Open design item:
-    # rank candidates by how much window metadata they carry, not by page.
     pid = deck['id']
     for pno, body in pages(pid):
         r = lt_growth_scan(flat(body))
@@ -929,149 +773,11 @@ def dividend(tk, deck):
                     'text': ev[:400]}
     return None
 
-# AEP FINANCING-PLAN TABLE (2026-09-24). AEP prints a full sources-and-uses table in almost
-# every deck, in three layouts: annual columns (2021-23; Q4 2023 in REVERSE year order),
-# a single total column with each value printed BEFORE its label (Q3/Q4 2024), and
-# '2026E | 2027E | 2028E-2030E | Total' (Q3 2025 on). The prose equity/debt extractors
-# never fire on it, so AEP's stated equity was a stale $2.3B forward and debt_b was null.
-# Row sums are order-invariant, and the table closes on an identity:
-#     required capital = net new debt + equity issuances + equity-unit conversions
-# where net new debt = gross debt-capital-market issuance - maturities - securitization
-# amortizations - short-term repayments. A table whose parse does not close within 2% is
-# REFUSED (returns None) - that check is what makes a three-layout parser safe.
-_AEP_NUM = r'(?:\$\s*)?(?:\(\s*[\d,]+\s*\)|[\d,]{1,7}(?![\d,])|-(?=\s))'
-_AEP_RUN = re.compile(r'\s*((?:' + _AEP_NUM + r'\s*){1,7})')
-_AEP_ROWS = [  # key, label regex (first match wins per key)
-    ('required', r'Required Capital(?: Market Needs)?(?! Financing)'),
-    ('maturities', r'(?:Long-term )?Debt Maturities(?: \(Senior Notes, PCRBs\))?'),
-    ('securitization', r'Securitization Amortizations?'),
-    ('st_repay', r'Short-term Debt Repayments'),
-    ('units', r'Equity Units Conversion'),
-    ('dcm_gross', r'Debt Capital Market Activity\d?|Total Debt Capital Market Needs'),
-    ('dcm_new', r'Debt Capital Markets? Needs \(New\)\d?'),
-]
-_AEP_EQ = r'(?:Plus: )?(?:Equity Issuances[^\d$(\-]{0,40}|Asset Monetization / Equity\d?)'
-
-def _aep_vals(s):
-    out = []
-    for t in re.findall(_AEP_NUM, s):
-        t = t.replace('$', '').strip()
-        if t == '-': out.append(0.0); continue
-        neg = t.startswith('(')
-        out.append((-1 if neg else 1) * float(t.strip('() ').replace(',', '')))
-    return out
-
-def _aep_row(fb, m, ncols, has_total):
-    """Values for one label: the numbers right AFTER it (column layouts), else the one
-    number right BEFORE it (the 2024 value-then-label layout). Returns the row total."""
-    if ncols == 1:
-        before = re.search(r'(' + _AEP_NUM + r')\s*(?:Less: |Plus: )?$', fb[max(0, m.start() - 25):m.start()])
-        return _aep_vals(before.group(1))[0] if before else None
-    after = _AEP_RUN.match(fb, m.end())
-    if after:
-        v = _aep_vals(after.group(1))
-        if has_total and len(v) >= 4: return v[3]
-        if len(v) >= ncols: return sum(v[:ncols])
-    before = re.search(r'(' + _AEP_NUM + r')\s*(?:Less: |Plus: )?$', fb[max(0, m.start() - 25):m.start()])
-    if before and ncols == 1:
-        return _aep_vals(before.group(1))[0]
-    return None
-
-def aep_financing(fb):
-    if 'Cash from Operations' not in fb or '$ in millions' not in fb.replace('($ in millions)', '$ in millions'):
-        return None
-    if not re.search(r'Debt Capital Markets? (?:Needs|Activity)', fb): return None
-    fb = re.sub(r'\(\$\d+B per year\)', ' ', fb)
-    t = re.search(r'(20\d\d)E?\s*[-–]\s*(20\d\d)E?(?: Financing Plan| \$ in millions)', fb)
-    yrs = sorted(set(int(y) for y in re.findall(r'\b(20[2-3]\d)E\b', fb)))
-    has_total = bool(re.search(r'20\d\dE\s+20\d\dE\s+20\d\dE\s*[-–]\s*20\d\dE\s+Total', fb))
-    if has_total or (t and not re.search(r'20\d\dE\s+20\d\dE', fb)):
-        ncols, w0, w1 = (3 if has_total else 1), int(t.group(1)), int(t.group(2))
-    elif len(yrs) >= 3:
-        # column count from the Required Capital row itself - a header can drop its 'E'
-        rm = re.search(r'Required Capital', fb)
-        run = _AEP_RUN.match(fb, rm.end()) if rm else None
-        n = len(_aep_vals(run.group(1))) if run else 0
-        if n < 3: return None
-        ncols, w0, w1 = n, yrs[0], yrs[0] + n - 1
-    else:
-        return None
-    r = {}
-    for k, lab in _AEP_ROWS:
-        m = re.search(lab, fb)
-        r[k] = _aep_row(fb, m, ncols, has_total) if m else None
-    # equity rows: every row in the 'Equity:' block (2025+), else the labelled equity row(s)
-    eq, eq_rows = 0.0, []
-    blk = re.search(r'Equity:(.*?)Debt Capital Market', fb)
-    if blk:
-        for m in re.finditer(r'([A-Za-z][A-Za-z0-9 /().–-]*?)\d?\s+((?:' + _AEP_NUM + r'\s*){4})', blk.group(1)):
-            v = _aep_vals(m.group(2))
-            eq += v[3]; eq_rows.append('%s %s' % (m.group(1).strip(), '{:,.0f}'.format(v[3])))
-    else:
-        for m in re.finditer(_AEP_EQ, fb):
-            v = _aep_row(fb, m, ncols, has_total)
-            if v is not None: eq += v; eq_rows.append('%s %s' % (m.group(0).strip(), '{:,.0f}'.format(v)))
-    if r['required'] is None or not eq_rows: return None
-    req = abs(r['required']); units = r['units'] or 0.0
-    matur = abs(r['maturities'] or 0); sec = abs(r['securitization'] or 0); st = abs(r['st_repay'] or 0)
-    if r['dcm_gross'] is not None:
-        net = abs(r['dcm_gross']) - matur - sec - st
-    elif r['dcm_new'] is not None and ncols == 1:        # 2024 layout: '(New)' already excludes maturities
-        net = abs(r['dcm_new']) - sec
-    elif r['dcm_new'] is not None:                        # 2021-23 layout: '(New)' is gross issuance
-        net = abs(r['dcm_new']) - matur - sec - st
-    else:
-        return None
-    close = net + eq + units
-    if req <= 0 or abs(close - req) / req > 0.02:
-        return None
-    return {'equity_b': round(eq / 1000.0, 2), 'debt_b': round(net / 1000.0, 2),
-            'window': '%d-%d' % (w0, w1), 'units_b': round(units / 1000.0, 2),
-            'required_b': round(req / 1000.0, 2), 'eq_rows': eq_rows,
-            'identity': 'required %s = net new debt %s + equity %s + units %s ($M)' % tuple(
-                '{:,.0f}'.format(x) for x in (req, net, eq, units))}
-
-# Embedded controls - REAL flattened table texts, one per layout, plus a tampered copy
-# (one maturity cell changed) that must be REFUSED by the identity check.
-_AEP_FIN_CONTROLS = [
-    ("2022-2026 Cash Flows and Financial Metrics $ in millions 2022E 2023E 2024E 2025E 2026E Cash from Operations $ 5,600 $ 6,100 $ 6,400 $ 6,900 $ 7,400 Net Cash Proceeds from Sale of Kentucky Operations1 1,400 - - - - Capital and JV Equity Contributions2 (7,600) (7,100) (8,400) (7,800) (7,400) Other Investing Activities (300) (400) (400) (400) (400) Common Dividends3 (1,600) (1,600) (1,700) (1,700) (1,700) Required Capital $ (2,500) $ (3,000) $ (4,100) $ (3,000) $ (2,100) Financing Required Capital $ (2,500) $ (3,000) $ (4,100) $ (3,000) $ (2,100) Debt Maturities (Senior Notes, PCRBs) (3,000) (2,400) (500) (1,800) (1,400) Securitization Amortizations (100) (200) (200) (100) (100) Equity Units Conversion 805 850 - - - Equity Issuances – Includes DRP - 100 600 700 700 Debt Capital Market Needs (New) $ (4,795) $ (4,650) $ (4,200) $ (4,200) $ (2,900) Financial Metrics", (2.1, 10.95, '2022-2026')),   # Q4 2021 - annual columns
-    ("2025E-2029E $ in millions $41,500 Cash from Operations 2,800 Plus: Net Cash Proceeds from Minority Interest Acquisition (54,400) Less: Capital Investments (11,050) Less: Dividends1 (2,300) Less: Other Investing Activities $ (23,450) Required Capital Market Needs (500) Less: Securitization Amortization 2,550 Plus: Equity Issuances – Includes $100M DRP Per Year $ (21,400) Debt Capital Markets Needs (New)2 (11,000) Debt Maturities $ (32,400) Total Debt Capital Market Needs FINANCING PLAN", (2.55, 20.9, '2025-2029')),   # Q4 2024 - value-before-label total column
-    ("2026-2030 Financing Plan ($ in millions) 2026E 2027E 2028E-2030E Total Cash from Operations $ 7,800 $ 8,600 $ 30,700 $ 47,100 Capital and JV Equity Contribution (12,900) (14,200) (50,800) (77,900) Other Investing Activities1 (200) (200) (700) (1,100) Common Dividends2 (2,100) (2,200) (6,800) (11,100) Required Capital $ (7,400) $ (8,000) $ (27,600) $ (43,000) Financing Required Capital $ (7,400) $ (8,000) $ (27,600) $ (43,000) Long-term Debt Maturities (2,300) (1,500) (7,200) (11,000) Securitization Amortizations (200) (300) (700) (1,200) Equity: Settlement of 2025 Equity Forward 1,800 - - 1,800 Dividend Reinvestment Plan 180 180 540 900 ATM Program 1,000 - 3,000 ($1B per year) 4,000 Growth Equity - - 3,000 3,000 Debt Capital Market Activity3 $ (6,920) $ (9,620) $ (28,960) $ (45,500) Financial Metrics", (9.7, 33.3, '2026-2030')),    # Q1 2026 - 2026E | 2027E | 2028E-2030E | Total
-]
-def _run_aep_fin_controls():
-    for txt, want in _AEP_FIN_CONTROLS:
-        r = aep_financing(txt)
-        got = (r['equity_b'], r['debt_b'], r['window']) if r else None
-        assert got == want, 'AEP FIN CONTROL FAILED: %r -> %r, want %r' % (txt[:50], got, want)
-    bad = _AEP_FIN_CONTROLS[2][0].replace('(11,000)', '(12,000)', 1)
-    assert aep_financing(bad) is None, 'AEP FIN CONTROL FAILED: a table that does not close was accepted'
-
-_run_aep_fin_controls()
-
-def _aep_fin_deck(deck):
-    for pno, body in pages(deck['id']):
-        fb = flat(body)
-        if 'Cash from Operations' in fb and 'Debt Capital Market' in fb:
-            r = aep_financing(fb)
-            if r:
-                r['page'] = pno
-                return r
-    return None
-
 def equity_plan(tk, deck):
     """Delegates to scripts/guidance_extractors.py (2026-09-21). Labels ATM
     program capacity / increments (caveat PREFIXED so it survives note
     truncation), records the plan window, and refuses executed actuals,
     printed ranges and credit-facility figures."""
-    if tk == 'AEP':
-        r = _aep_fin_deck(deck)
-        if r:
-            cav = ('[ASSET MONETIZATION / EQUITY COMBINED in one printed row] '
-                   if any('Asset Monetization' in x for x in r['eq_rows']) else '')
-            units = (' + equity-unit conversions $%gB (not counted as issuance)' % r['units_b']) if r['units_b'] else ''
-            return {'equity_b': r['equity_b'], 'basis': 'printed', 'page': r['page'],
-                    'text': '%s[%s plan] [AEP financing table, $M] equity rows: %s%s | %s'
-                            % (cav, r['window'], '; '.join(r['eq_rows']), units, r['identity'])}
     for pno, body in pages(deck['id']):
         v, kind, window, ev = equity_from_text(flat(body))
         if v is not None:
@@ -1084,13 +790,6 @@ def debt_plan(tk, deck):
     2026-09-21 — debt_b was previously None BY CONSTRUCTION. Guards: maturities
     schedules, bridge deltas, executed/refinanced/repaid, ranges. $M table
     values are converted with the conversion stated in the text."""
-    if tk == 'AEP':
-        r = _aep_fin_deck(deck)
-        if r:
-            return {'debt_b': r['debt_b'], 'basis': 'printed', 'page': r['page'],
-                    'text': '[%s plan] [AEP financing table, $M] NET NEW debt = gross debt-capital-market issuance '
-                            'less maturities, securitization amortizations and short-term repayments | %s'
-                            % (r['window'], r['identity'])}
     for pno, body in pages(deck['id']):
         v, window, ev = debt_from_text(flat(body))
         if v is not None:
