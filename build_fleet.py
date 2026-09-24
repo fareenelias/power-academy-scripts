@@ -35,6 +35,20 @@ FOSSIL = {'Coal', 'Gas CC', 'Gas CT/recip', 'Gas steam', 'Oil'}
 # Add an entry only with a stated source.
 OWNER_AFFILIATE_IDS = {
     '62643': ('TLN', "MC Project Company LLC - owns Martins Creek 3/4 (and retired CTG1-4) 100%; confirmed a Talen entity by Fareen 2026-09-24"),
+    '61044': ('VST', "Comanche Peak Power Co, LLC - owns Comanche Peak 100%; confirmed Vistra by Fareen 2026-09-24"),
+    '56882': ('VST', "DeCordova Power Company LLC - owns DeCordova 100%; confirmed Vistra by Fareen 2026-09-24"),
+    '61901': ('XIFR', "NextEra Energy Partners LP - the partnership itself (renamed XPLR Infrastructure 2025); 49.9% of the NEP tranche at Desert Sunlight 250/300 - basis: EIA owner name"),
+    '56622': ('NEE', "Shaw Creek Solar (aka Aiken County Solar) - 100% owned by NextEra Energy Resources; confirmed by Fareen 2026-09-24 (EIA owner address is NextEra HQ, 700 Universe Blvd)"),
+}
+# Plant-level ownership that REPLACES Schedule 4 for every generator at the plant, where EIA's
+# owner rows are stale. owners = [(coverage ticker or None, fraction, name)]; stated source required.
+PLANT_OWNERSHIP_OVERRIDES = {
+    '57993': {'plant': 'Desert Sunlight 300', 'owners': [('XIFR', 0.499, 'XPLR Infrastructure LP'), (None, 0.2447, 'California Public Employees (CalPERS)'),
+              (None, 0.1372, 'Clearway Energy Group LLC'), (None, 0.1128, 'Clearway Energy Inc.'), (None, 0.0053, 'Harbert Mgmt Corp.'), ('NEE', 0.001, 'NextEra Energy Resources LLC')],
+              'source': "Plant-level ownership table supplied by Fareen 2026-09-24; EIA-860 2025ER Schedule 4 still shows pre-sale owners (Shaw Creek 50% / GE / Sumitomo) on most blocks"},
+    '58542': {'plant': 'Desert Sunlight 250', 'owners': [('XIFR', 0.499, 'XPLR Infrastructure LP'), (None, 0.2447, 'California Public Employees (CalPERS)'),
+              (None, 0.1372, 'Clearway Energy Group LLC'), (None, 0.1128, 'Clearway Energy Inc.'), (None, 0.0053, 'Harbert Mgmt Corp.'), ('NEE', 0.001, 'NextEra Energy Resources LLC')],
+              'source': "Plant-level ownership table supplied by Fareen 2026-09-24 (same holders as Desert Sunlight 300); EIA Schedule 4 stale"},
 }
 AS_OF_YEAR = 2025            # data year of the EIA-860 file
 NOW = date.today().year
@@ -181,10 +195,18 @@ def main():
         mw = num(r.get('Nameplate Capacity (MW)')) or 0.0
         g = group(r.get('Technology'))
         # ownership share per coverage ticker (v2)
+        # owners of this generator: [(coverage tickers, fraction, name)] - a plant-level override
+        # (stated source) beats Schedule 4; Schedule 4 beats "100% the operator's".
+        if key[0] in PLANT_OWNERSHIP_OVERRIDES:
+            ol = [({t} if t else set(), f, n) for t, f, n in PLANT_OWNERSHIP_OVERRIDES[key[0]]['owners']]
+        elif key in own:
+            ol = [(oid2t.get(oid, set()), f, n) for oid, f, n in own[key]]
+        else:
+            ol = None
         share = collections.Counter()
-        if key in own:
-            for oid, f, _ in own[key]:
-                for t in oid2t.get(oid, ()):
+        if ol is not None:
+            for tks, f, _ in ol:
+                for t in tks:
                     share[t] += f
         else:
             for t in ts:
@@ -192,17 +214,18 @@ def main():
         for t, f in share.items():
             if f <= 0: continue
             x = T(t); x['owned'][g] += mw * f
-            if key in own:
+            if ol is not None:
                 x['joint'].append({'plant': r.get('Plant Name'), 'plant_code': key[0], 'unit': key[1], 'state': r.get('State'),
                                    'tech': g, 'mw': round(mw, 1), 'share_pct': round(100 * f, 1), 'owned_mw': round(mw * f, 1),
                                    'operator': r.get('Utility Name'), 'operated_by_you': t in ts,
-                                   'co_owners': [{'name': n, 'pct': round(100 * ff, 1)} for oid, ff, n in own[key] if t not in oid2t.get(oid, ())]})
+                                   'co_owners': [{'name': n, 'pct': round(100 * ff, 2)} for tks, ff, n in ol if t not in tks],
+                                   **({'ownership_source': PLANT_OWNERSHIP_OVERRIDES[key[0]]['source']} if key[0] in PLANT_OWNERSHIP_OVERRIDES else {})})
         for t in ts:                      # operators with 0% ownership still appear in the operated view
-            if key in own and t not in share:
+            if ol is not None and t not in share:
                 T(t)['joint'].append({'plant': r.get('Plant Name'), 'plant_code': key[0], 'unit': key[1], 'state': r.get('State'),
                                       'tech': g, 'mw': round(mw, 1), 'share_pct': 0.0, 'owned_mw': 0.0,
                                       'operator': r.get('Utility Name'), 'operated_by_you': True,
-                                      'co_owners': [{'name': n, 'pct': round(100 * ff, 1)} for _, ff, n in own[key]]})
+                                      'co_owners': [{'name': n, 'pct': round(100 * ff, 2)} for _, ff, n in ol]})
         if not ts:
             continue
         oy = yr(r.get('Operating Year')); ry = yr(r.get('Planned Retirement Year'))
