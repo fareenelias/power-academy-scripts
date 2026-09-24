@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""build_opco_cik_map.py - refresh/extend data\opco_cik_map.json (SEC-by-subsidiary phase 2).
+r"""build_opco_cik_map.py - refresh/extend data\opco_cik_map.json (SEC-by-subsidiary phase 2).
 
 The map was seeded and VERIFIED 2026-09-21 (every cik checked against
 data.sec.gov/submissions: name, formerNames, filing forms). This script re-verifies
@@ -50,15 +50,21 @@ def submissions(cik):
             'last_10q': last(lambda f: f.startswith('10-Q'))}
 
 def edgar_search(company):
-    q = urllib.parse.urlencode({'action': 'getcompany', 'company': company,
-                                'count': '20', 'output': 'atom'})
-    xml = get('https://www.sec.gov/cgi-bin/browse-edgar?' + q, 'www.sec.gov').decode('utf-8', 'ignore')
+    """EDGAR company-name lookup. 2026-09-24: www.sec.gov/cgi-bin/browse-edgar now returns 403 to
+    scripts, so this uses the JSON index behind EDGAR's own company search box
+    (efts.sec.gov/LATEST/search-index?keysTyped=...); each hit's _id is the CIK."""
+    q = urllib.parse.urlencode({'keysTyped': company})
+    d = json.loads(get('https://efts.sec.gov/LATEST/search-index?' + q, 'efts.sec.gov'))
     out = []
-    for m in re.finditer(r'<company-name>([^<]+)</company-name>.*?<cik>(\d+)</cik>', xml, re.S):
-        out.append((m.group(1).strip(), int(m.group(2))))
-    for m in re.finditer(r'<cik>(\d+)</cik>\s*</?\w*>?\s*<company-name>([^<]+)</company-name>', xml):
-        out.append((m.group(2).strip(), int(m.group(1))))
-    return list(dict((c, n) for n, c in out).items())  # [(cik, name)]
+    for h in (d.get('hits') or {}).get('hits') or []:
+        src = h.get('_source') or {}
+        name = src.get('entity') or h.get('entity') or ''
+        cik = h.get('_id') or src.get('cik')
+        try:
+            out.append((int(cik), name))
+        except (TypeError, ValueError):
+            pass
+    return out  # [(cik, name)]
 
 def main():
     check = '--check' in sys.argv
