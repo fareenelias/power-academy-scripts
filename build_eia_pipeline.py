@@ -47,7 +47,10 @@ COMPANIES = {
     "AEP":  {"name":"American Electric Power",   "type":"electric", "subsidiaries":["Appalachian Power","Indiana Michigan Power","Ohio Power","Public Service Co of Oklahoma","Southwestern Electric Power","AEP Texas","Kentucky Power","Kingsport Power","Wheeling Power","AEP Generation Resources"]},
     "VST":  {"name":"Vistra Energy",             "type":"ipp",      "subsidiaries":["Luminant","TXU Energy","Vistra","Dynegy"]},
     "TLN":  {"name":"Talen Energy",             "type":"ipp",      "subsidiaries":["Talen Energy","PPL Susquehanna","Susquehanna Nuclear","Montour","Brunner Island","Martins Creek","Raven Power","H.A. Wagner","C.P. Crane","Brandon Shores","Talen Montana","Colstrip","Jade Renewable","Sapphire Sky"]},
-    "XIFR": {"name":"XPLR Infrastructure",       "type":"yieldco",  "subsidiaries":["NextEra Energy Partners","XPLR Infrastructure","NEP","Genesis Solar","Mountain Wind","Duane Arnold","Jericho Rise"]},
+    # 2026-09-24i: 'NEP' matched Nephi City / Neptune and 'Mountain Wind' matched CPV Spruce/Canton, Arbuckle
+    # and Dans Mountain; Duane Arnold is NEE's, Jericho Rise is not XPLR's. XIFR's IDs now come from the S&P
+    # plant list (SP_MAP_IDS below); the names left here only log what name matching would have found.
+    "XIFR": {"name":"XPLR Infrastructure",       "type":"yieldco",  "subsidiaries":["NextEra Energy Partners","XPLR Infrastructure","Genesis Solar"]},
     "AWR":  {"name":"American States Water",     "type":"water",    "subsidiaries":[]},
     "CWT":  {"name":"California Water Service",  "type":"water",    "subsidiaries":[]},
     "YORW": {"name":"York Water Company",        "type":"water",    "subsidiaries":[]},
@@ -94,6 +97,37 @@ GEN_AFFILIATE_IDS = {
     "VST":  {"64225": "energy harbor nuclear", "63726": "vistra zero"},
     "CMS":  {"3837": "cms generation", "3838": "cms generation"},
 }
+
+# S&P plant lists -> operator IDs (2026-09-24i). An EIA operator ID is taken when EVERY operable plant it
+# runs is on the ticker's S&P list (so a shared NEER operating ID never drags in someone else's plant);
+# for NEE only plants whose S&P operator is a NextEra entity count. replace=True drops name matching.
+SP_MAP_IDS = {
+    "XIFR": {"file": "xplr_plant_map.json", "operator": None, "replace": True},
+    "NEE":  {"file": "nee_plant_map.json",  "operator": r"NextEra|FPL|Florida Power & Light|ESI Energy|Gulf Power", "replace": False},
+}
+
+def sp_exclusive_ids(ticker, gen_df):
+    import re as _re
+    cfg = SP_MAP_IDS.get(ticker)
+    path = BASE_DIR / cfg["file"] if cfg else None
+    if not cfg or not path.exists() or gen_df.empty or "plant_id" not in gen_df.columns:
+        return []
+    m = json.loads(path.read_text(encoding="utf-8"))
+    codes = set()
+    for p in m.get("plants", []):
+        if cfg["operator"] and not _re.search(cfg["operator"], str(p.get("sp_operator") or "")):
+            continue
+        codes |= {str(e["plant_code"]) for e in p.get("eia", [])}
+    norm = lambda v: str(int(float(v))) if str(v).replace(".", "", 1).isdigit() else str(v)
+    plants_by_uid = {}
+    for _, row in gen_df[["utility_id", "plant_id"]].drop_duplicates().iterrows():
+        plants_by_uid.setdefault(str(row["utility_id"]), set()).add(norm(row["plant_id"]))
+    out, shared = [], []
+    for uid, pl in plants_by_uid.items():
+        if pl & codes:
+            (out if pl <= codes else shared).append(uid)
+    log.info(f"{ticker}: S&P plant list -> {len(out)} exclusive operator IDs; {len(shared)} shared IDs left out: {shared[:8]}")
+    return sorted(out)
 
 DENY_IDS = {
     "AEE": {"3716": "Clay-Union Electric Corp (SD co-op)", "19435": "Union Electric Membership Corp (NC co-op)"},
@@ -472,6 +506,13 @@ def match_companies(gen_df: pd.DataFrame, territories: dict) -> dict:
                         matched_ids.append(uid); matched_names.append(uname)
                     break
 
+        if SP_MAP_IDS.get(ticker, {}).get("replace"):
+            if matched_names:
+                log.info(f"{ticker}: name matching found {matched_names} - replaced by the S&P plant list")
+            matched_ids, matched_names = [], []
+        for sid in sp_exclusive_ids(ticker, gen_df):
+            if sid not in matched_ids:
+                matched_ids.append(sid); matched_names.append(str(gen_utils.get(sid, f"ID:{sid}")) + " (S&P list)")
         for did in DENY_IDS.get(ticker, {}):
             if did in matched_ids:
                 i = matched_ids.index(did); matched_ids.pop(i); matched_names.pop(i)

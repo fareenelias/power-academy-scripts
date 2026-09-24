@@ -42,26 +42,43 @@ OWNER_AFFILIATE_IDS = {
 }
 # S&P-authoritative plant lists (owner vehicles whose EIA operator-ID attribution is unreliable).
 # ticker -> data file; each file maps S&P plants to EIA plant codes (+ optional technology filter).
-SP_AUTHORITATIVE = {'XIFR': os.path.join(BASE, 'data', 'xplr_plant_map.json')}
+SP_AUTHORITATIVE = {
+    # exclusive: never credit the ticker at a plant its S&P list lacks (XPLR's EIA IDs are unreliable).
+    # restrict_operated: operated view only at S&P plants. add_operated: also count S&P plants whose S&P
+    # operator matches the pattern (NEER runs project LLCs that file under their own EIA operator IDs).
+    'XIFR': {'file': os.path.join(BASE, 'data', 'xplr_plant_map.json'), 'exclusive': True, 'restrict_operated': True, 'add_operated': None},
+    'NEE':  {'file': os.path.join(BASE, 'data', 'nee_plant_map.json'), 'exclusive': False, 'restrict_operated': False,
+             'add_operated': r'NextEra|FPL|Florida Power & Light|ESI Energy|Gulf Power'},
+}
 def load_sp_maps():
     out = {}
-    for t, path in SP_AUTHORITATIVE.items():
-        if not os.path.exists(path):
+    for t, cfg in SP_AUTHORITATIVE.items():
+        if not os.path.exists(cfg['file']):
             continue
         m = collections.defaultdict(list)
-        for p in json.load(open(path, encoding='utf-8')).get('plants', []):
+        for p in json.load(open(cfg['file'], encoding='utf-8')).get('plants', []):
+            pct = p.get('pct', p.get('xifr_pct'))
             for e in p.get('eia', []):
-                m[str(e['plant_code'])].append((e.get('tech'), float(p['xifr_pct']) / 100.0, p['sp_name']))
+                tf = e.get('tech'); tf = [tf] if isinstance(tf, str) else tf
+                m[str(e['plant_code'])].append((tf, float(pct) / 100.0, p['sp_name'], p.get('sp_operator') or ''))
         out[t] = m
     return out
 def sp_share(spm, t, plant, g):
-    for tf, f, n in spm.get(t, {}).get(plant, ()):
-        if tf is None or tf == g:
+    for tf, f, n, _ in spm.get(t, {}).get(plant, ()):
+        if tf is None or g in tf:
             return f, n
     return None, None
-def sp_filter(spm, ts, plant):
-    # drop an S&P-authoritative ticker from operator attribution at plants its S&P list does not hold
-    return {t for t in (ts or ()) if t not in spm or plant in spm[t]}
+def sp_filter(spm, ts, plant, g=None):
+    """operator attribution after the S&P rules: drop a restrict_operated ticker away from its plants;
+    add an add_operated ticker at its S&P plants run by one of its own entities."""
+    ts = {t for t in (ts or ()) if not (t in spm and SP_AUTHORITATIVE[t]['restrict_operated'] and plant not in spm[t])}
+    for t, m in spm.items():
+        pat = SP_AUTHORITATIVE[t]['add_operated']
+        if pat and plant in m:
+            for tf, f, n, op in m[plant]:
+                if (g is None or tf is None or g in tf) and re.search(pat, op):
+                    ts = ts | {t}; break
+    return ts
 
 # Plant-level ownership that REPLACES Schedule 4 for every generator at the plant, where EIA's
 # owner rows are stale. owners = [(coverage ticker or None, fraction, name)]; stated source required.
@@ -193,7 +210,7 @@ def main():
         own[(str(r.get('Plant Code')).split('.')[0], str(r.get('Generator ID')))].append(
             (str(r.get('Ownership ID')).strip().split('.')[0], f, r.get('Owner Name')))
     bad_sum = [k for k, v in own.items() if abs(sum(f for _, f, _ in v) - 1.0) > 0.02]
-    spm = load_sp_maps()
+    spm = load_sp_maps(); sp_qc = []
     oid2t = collections.defaultdict(set, {k: set(v) for k, v in uid2t.items()})
     for oid, (t, _why) in OWNER_AFFILIATE_IDS.items():
         oid2t[oid].add(t)
@@ -215,9 +232,9 @@ def main():
         if not str(r.get('Status') or '').upper().startswith(('OP', 'SB', 'OS', 'OA')):
             continue
         key = (str(r.get('Plant Code')).split('.')[0], str(r.get('Generator ID')))
-        ts = sp_filter(spm, uid2t.get(str(r.get('Utility ID')).strip().split('.')[0]), key[0])
         mw = num(r.get('Nameplate Capacity (MW)')) or 0.0
         g = group(r.get('Technology'))
+        ts = sp_filter(spm, uid2t.get(str(r.get('Utility ID')).strip().split('.')[0]), key[0], g)
         # ownership share per coverage ticker (v2)
         # owners of this generator: [(coverage tickers, fraction, name)] - a plant-level override
         # (stated source) beats Schedule 4; Schedule 4 beats "100% the operator's".
@@ -227,24 +244,35 @@ def main():
             ol = [(oid2t.get(oid, set()), f, n) for oid, f, n in own[key]]
         else:
             ol = None
-        # S&P-authoritative owner (XIFR): its share comes from the S&P list; the other coverage owners
-        # keep their EIA-derived shares, scaled down to fit the remainder. Explicit plant overrides win.
-        if key[0] not in PLANT_OWNERSHIP_OVERRIDES:
+        # S&P-authoritative owners: each listed ticker's share is its S&P %; other coverage owners keep their
+        # EIA-derived shares scaled into what is left; an exclusive ticker is never credited off its list.
+        # Explicit plant overrides win over everything.
+        if key[0] not in PLANT_OWNERSHIP_OVERRIDES and spm:
+            fixed = {}
             for st_t in spm:
                 f_sp, n_sp = sp_share(spm, st_t, key[0], g)
-                base = ol if ol is not None else [(set(ts), 1.0, r.get('Utility Name'))]
-                others = [(tks - {st_t}, f, n) for tks, f, n in base]
-                if f_sp is None:
-                    if ol is not None: ol = [o for o in others]          # not an S&P plant: never credit st_t here
-                    continue
+                if f_sp is not None:
+                    fixed[st_t] = (f_sp, n_sp)
+            base = ol if ol is not None else [(set(ts), 1.0, r.get('Utility Name'))]
+            excl = {t for t in spm if SP_AUTHORITATIVE[t]['exclusive']}
+            if fixed:
+                tot_fixed = sum(f for f, _ in fixed.values())
+                if tot_fixed > 1.0 + 1e-6:           # S&P lists overlap (e.g. both claim 100%): scale, and say so
+                    sp_qc.append({'plant_code': key[0], 'unit': key[1], 'tech': g, 'claims': {t: v[0] for t, v in fixed.items()}})
+                    fixed = {t: (f / tot_fixed, n) for t, (f, n) in fixed.items()}; tot_fixed = 1.0
+                others = [(tks - set(fixed) - excl, f, n) for tks, f, n in base]
                 cov = sum(f for tks, f, _ in others if tks)
-                k_sc = min(1.0, (1.0 - f_sp) / cov) if cov > 0 else 1.0
+                k_sc = min(1.0, (1.0 - tot_fixed) / cov) if cov > 0 else 1.0
                 covl = [(tks, f * k_sc, n) for tks, f, n in others if tks]
-                rem = max(0.0, 1.0 - f_sp - sum(f for _, f, _ in covl))
+                rem = max(0.0, 1.0 - tot_fixed - sum(f for _, f, _ in covl))
                 nonc = [(tks, f, n) for tks, f, n in others if not tks]
                 nsum = sum(f for _, f, _ in nonc)
                 nonc = [(tks, f * rem / nsum, n) for tks, f, n in nonc] if nsum > 0 else ([(set(), rem, 'Other owners (not itemised by S&P)')] if rem > 1e-6 else [])
-                ol = [({st_t}, f_sp, '%s (S&P: %s)' % (st_t, n_sp))] + covl + nonc
+                ol = [({t}, f, '%s (S&P: %s)' % (t, n)) for t, (f, n) in fixed.items()] + covl + nonc
+            elif ol is not None and excl:
+                ol = [(tks - excl, f, n) for tks, f, n in ol]     # not an S&P plant: exclusive tickers never credited here
+            elif ol is None and (set(ts) & excl):
+                ol = [(set(ts) - excl, 1.0, r.get('Utility Name'))]
         share = collections.Counter()
         if ol is not None:
             for tks, f, _ in ol:
@@ -367,9 +395,13 @@ def main():
             'utility_ids': (idmap.get(t) or {}).get('utility_ids'),
         }
     doc['_perf_qc'] = perf_qc
-    for st_t, path in SP_AUTHORITATIVE.items():
-        if st_t in spm:
-            doc['_caveats'].append("%s: owned view follows the S&P Global plant list (%s); its operated view is limited to those plants because its EIA operator-ID list is unreliable - for this name the owned figure is the meaningful one." % (st_t, os.path.basename(path)))
+    doc['_sp_qc'] = {'overlapping_claims_scaled': sp_qc[:50], 'n_overlaps': len(sp_qc)}
+    for st_t, cfg in SP_AUTHORITATIVE.items():
+        if st_t not in spm: continue
+        if cfg['restrict_operated']:
+            doc['_caveats'].append("%s: owned view follows the S&P Global plant list (%s); its operated view is limited to those plants because its EIA operator-ID list is unreliable - for this name the owned figure is the meaningful one." % (st_t, os.path.basename(cfg['file'])))
+        else:
+            doc['_caveats'].append("%s: ownership %% at S&P-listed plants follows the S&P Global plant list (%s); plants S&P lists but EIA files under project-company IDs are added to the operated view when S&P names a %s entity as operator. Plants S&P does not list keep their EIA-derived ownership." % (st_t, os.path.basename(cfg['file']), st_t))
     if perf:
         doc['_caveats'].append("Capacity factor / heat rate: EIA-923 %d final, plant x prime-mover net generation over the EIA-860 %d nameplate of that plant's generators (operated view); plant-prime-movers with a unit added or retired in or after %d are excluded (part-year), as are any computing above 100%%. Heat rate = fuel MMBtu for electricity / net MWh, fossil only." % (PERF_YEAR, AS_OF_YEAR, PERF_YEAR))
     doc['_ownership_qc'] = {'owner_affiliate_ids': {k: {'ticker': v[0], 'why': v[1]} for k, v in OWNER_AFFILIATE_IDS.items()},
