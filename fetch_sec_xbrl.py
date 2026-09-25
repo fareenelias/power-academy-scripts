@@ -25,7 +25,9 @@ import json, os, sys, time, gzip, urllib.request
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAP = os.path.join(BASE, 'data', 'opco_cik_map.json')
 OUT = os.path.join(BASE, 'data', '_sec_xbrl')
-UA = os.environ.get('SEC_UA', 'PowerAcademy/1.0 power-academy@internal')
+# SEC blocks requests whose User-Agent has no real contact (403 on the first call, 2026-09-25).
+# Set it once per PowerShell session:  $env:SEC_UA = "Your Name you@example.com"
+UA = os.environ.get('SEC_UA', '').strip()
 SLEEP = 0.25
 COVERAGE = ['AEE', 'AEP', 'AQN', 'AWK', 'AWR', 'CMS', 'CWT', 'D', 'EIX', 'ES', 'ETR', 'EVRG',
             'GWRS', 'HE', 'HTO', 'MSEX', 'NEE', 'PCG', 'POR', 'PPL', 'TLN', 'VST', 'WTRG',
@@ -71,6 +73,10 @@ def instance_name(cik, acc):
 
 def main():
     force, dry = '--force' in sys.argv, '--dry-run' in sys.argv
+    if '@' not in UA:
+        sys.exit('SEC requires a User-Agent with a real name and email. In PowerShell run:\n'
+                 '  $env:SEC_UA = "Your Name you@example.com"\n'
+                 'then re-run this script (VPN off).')
     os.makedirs(OUT, exist_ok=True)
     cmap = json.load(open(MAP, encoding='utf-8'))['opcos_by_ticker']
     tick = json.loads(get('https://www.sec.gov/files/company_tickers.json'))
