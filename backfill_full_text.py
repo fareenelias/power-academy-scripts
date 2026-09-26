@@ -32,7 +32,38 @@ MAX_PAGES   = 60          # single-report PDFs longer than this keep the first 6
 SKIP_PAGES  = {}          # optional: {"GWRS-FreedomBroker_20260305.pdf": [5, 6, 7, 8, 9]}
 
 
+TESSERACT_PATHS = [r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                   r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+                   os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe")]
+_OCR_OK = None
+
+
+def ocr_ready():
+    """winget installs Tesseract but does not put it on PATH for the current shell - point pytesseract at the
+    install directly. Checked once; returns False (and says why) if OCR can't run."""
+    global _OCR_OK
+    if _OCR_OK is not None:
+        return _OCR_OK
+    try:
+        import shutil, pytesseract
+        exe = shutil.which("tesseract") or next((p for p in TESSERACT_PATHS if os.path.exists(p)), None)
+        if exe:
+            pytesseract.pytesseract.tesseract_cmd = exe
+            pytesseract.get_tesseract_version()
+            print(f"OCR: using {exe}")
+            _OCR_OK = True
+        else:
+            print("OCR: tesseract.exe not found on PATH or in", "; ".join(TESSERACT_PATHS), "- scanned pages will be skipped")
+            _OCR_OK = False
+    except Exception as e:
+        print(f"OCR: unavailable ({e}) - scanned pages will be skipped")
+        _OCR_OK = False
+    return _OCR_OK
+
+
 def ocr_page(page):
+    if not ocr_ready():
+        return ""
     try:
         import pytesseract
         from PIL import Image
@@ -51,7 +82,9 @@ def extract(doc, pages, skip):
         page = doc[i - 1]
         txt = page.get_text("text").strip()
         if len(txt) < MIN_CHARS:
-            txt = ocr_page(page).strip(); n_ocr += 1
+            o = ocr_page(page).strip()
+            if o:
+                txt = o; n_ocr += 1
         if txt:
             out[str(i)] = txt
     return out, n_ocr
@@ -113,7 +146,7 @@ def main():
         txt, n_ocr = extract(doc, pages, set(SKIP_PAGES.get(sf, [])))
         r["full_text_pages"] = txt
         done += 1
-        print(f"    {len(txt)} pages, {n_ocr} OCR'd")
+        print(f"    {len(txt)} pages, {n_ocr} OCR'd" + ("" if n_ocr or _OCR_OK is not False else " (scanned pages skipped - no OCR)"))
         if done % 20 == 0:                      # checkpoint - a crash never loses the whole run
             with open(DATA_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
