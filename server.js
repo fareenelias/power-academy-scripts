@@ -93,12 +93,40 @@ setInterval(() => {
     if (m !== _corpusManifestMtime) { _corpusManifestMtime = m; _corpusCache.clear(); }
   } catch (e) { /* no manifest yet */ }
 }, 10000);
+// Map a client-supplied relative path onto a file under DATA_DIR.
+// - decodes %xx, refuses NUL, and refuses anything that resolves outside DATA_DIR
+//   (a raw `/api/eia/../state.json` used to walk straight out of data\)
+// - case-insensitive per segment, so a case-sensitive host serves `guidance_ip.json`
+//   for the on-disk `Guidance_ip.json` exactly as Windows does
+const DATA_ROOT = path.resolve(DATA_DIR);
+function resolveDataPath(rel) {
+  let dec;
+  try { dec = decodeURIComponent(rel || ''); } catch (e) { return null; }
+  if (!dec || dec.includes('\0')) return null;
+  const segs = dec.split(/[\\/]+/).filter(Boolean);
+  if (!segs.length || segs.some(s => s === '..' || s === '.' || /:/.test(s))) return null;
+  let cur = DATA_ROOT;
+  for (const seg of segs) {
+    let next = path.join(cur, seg);
+    if (!fs.existsSync(next)) {
+      try {
+        const hit = fs.readdirSync(cur).find(n => n.toLowerCase() === seg.toLowerCase());
+        if (hit) next = path.join(cur, hit);
+      } catch (e) { /* cur is not a directory - leave next as-is, serveFile 404s */ }
+    }
+    cur = next;
+  }
+  const resolved = path.resolve(cur);
+  if (resolved !== DATA_ROOT && !resolved.startsWith(DATA_ROOT + path.sep)) return null;
+  return resolved;
+}
+
 function serveFile(req, res, filePath, notFoundMsg) {
   let stat;
   try { stat = fs.statSync(filePath); }
   catch(e) {
     res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: notFoundMsg || 'Not found', path: filePath }));
+    res.end(JSON.stringify({ error: notFoundMsg || 'Not found', file: path.basename(filePath) }));
     return;
   }
   let entry = _fileCache.get(filePath);
@@ -233,8 +261,12 @@ const server = http.createServer(async (req, res) => {
 
   // ── 5. Serve EIA plant/territory data ─────────────────
   if (pathname.startsWith('/api/eia/')) {
-    const file = pathname.replace('/api/eia/', '');
-    const filePath = path.join(DATA_DIR, file.replace(/\//g, path.sep));
+    const filePath = resolveDataPath(pathname.slice('/api/eia/'.length));
+    if (!filePath) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Bad path' }));
+      return;
+    }
     serveFile(req, res, filePath, 'Not found');
     return;
   }
