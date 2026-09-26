@@ -22,6 +22,17 @@ EXPLAINED = {
         'figure is FPL consolidated incl. Gulf Power (2,890 = FPL segment 2,650 + Gulf 238 + other 2); the FPL segment alone '
         '(2,650) ties to FERC. FERC Form 1 is FPL-only for 2020.',
 }
+# 2026-09-26: re-read against the as-filed FERC Form 1 XBRL (PUDL out_ferc1__yearly_income_statements_sched114): the FERC side of
+# every break below equals the filed Form 1 net income exactly, so neither file is wrong - these are GAAP (10-K) vs FERC (Form 1)
+# basis differences. The ROE Gap uses the FERC basis throughout.
+_BASIS = ('Both figures verified as filed (FERC side = Form 1 XBRL via PUDL, sched. 114 net income; SEC side = 10-K XBRL). A GAAP vs '
+          'FERC-basis difference, not a data error. Form 1 carries large regulatory credits in these years ({rc}), which GAAP books '
+          'differently; the ROE Gap uses the FERC basis.')
+for _k, _rc in {('EVRG', 'evergy kansas central', 2020): '$60.5M', ('EVRG', 'evergy kansas central', 2021): '$75.5M', ('EVRG', 'evergy kansas central', 2022): '$64.5M',
+                ('EVRG', 'evergy metro', 2020): '$197.1M', ('EVRG', 'evergy metro', 2021): '$272.1M',
+                ('EVRG', 'evergy metro', 2022): '$309.4M',
+                ('D', 'virginia electric and power', 2021): '$931.3M', ('D', 'virginia electric and power', 2022): '$574.6M'}.items():
+    EXPLAINED[_k] = _BASIS.format(rc='regulatory credits ' + _rc)
 def n(x):
     x = re.sub(r'\(.*?\)', '', x.lower())
     x = re.sub(r'\b(company|co|inc|corporation|corp|llc|the)\b|[.,&]', ' ', x)
