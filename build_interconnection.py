@@ -2,7 +2,8 @@ r"""build_interconnection.py - interconnection-queue exposure per coverage name 
 
 INPUT (one download, desktop - lbl.gov is not reachable from the cloud):
   Berkeley Lab 'Queued Up' project-level data (https://emp.lbl.gov/queues -> "data file").
-  Save the .xlsx anywhere under data\eia_cache\ or data\Scans\NEW\ with 'queue' in the file name.
+  Save the .xlsx under data\Berkeley Lab\, data\eia_cache\ or data\Scans\NEW\ with 'queue' in the file name
+  (2026-09-26: LBNL_Ix_Queue_Data_File_thru2025.xlsx in data\Berkeley Lab).
 
 The workbook's project sheet is found by its header row (a row holding q_id + q_status or
 equivalents); column names are matched from ALIASES so a renamed column in a new vintage does
@@ -27,7 +28,7 @@ ALIASES = {
     'q_id': ['q_id', 'queue_id', 'queue id', 'project id'],
     'q_status': ['q_status', 'status', 'queue_status'],
     'q_date': ['q_date', 'queue_date', 'queue date', 'request date'],
-    'ia_status': ['ia_status_clean', 'ia_status', 'ia status'],
+    'ia_status': ['ia_status_clean', 'ia_status', 'ia status', 'ia_phase_clean'],   # 2025 file: IA_phase_clean
     'on_date': ['on_date', 'cod', 'actual cod'],
     'state': ['state'],
     'county': ['county'],
@@ -35,9 +36,9 @@ ALIASES = {
     'entity': ['entity', 'balancing_authority', 'ba'],
     'utility': ['utility', 'transmission_owner', 'transmission owner', 'poi_utility', 'interconnecting utility'],
     'poi': ['poi_name', 'poi', 'point of interconnection'],
-    'type': ['type_clean', 'type1', 'resource_type', 'fuel'],
-    'mw': ['mw1', 'capacity_mw', 'mw', 'summer capacity (mw)'],
-    'mw2': ['mw2'], 'type2': ['type2'],
+    'type': ['type_clean', 'type1', 'type_1', 'resource_type', 'fuel'],
+    'mw': ['mw1', 'mw_1', 'capacity_mw', 'mw', 'summer capacity (mw)'],
+    'mw2': ['mw2', 'mw_2'], 'type2': ['type2', 'type_2'],
 }
 REQUIRED = ['q_status', 'q_date', 'type', 'mw']
 UTILITY_ALIASES = [
@@ -45,16 +46,16 @@ UTILITY_ALIASES = [
     ('AEP', r'\baep\b|american electric power|appalachian power|indiana michigan|ohio power|public service co(?:mpany)? of oklahoma|\bpso\b|southwestern electric|swepco|kentucky power|wheeling power'),
     ('AEE', r'ameren|union electric'),
     ('ETR', r'entergy'),
-    ('CMS', r'consumers energy|\bcms\b'),
+    ('CMS', r'consumers energy|\bcms\b|^\s*metc\s*$'),   # METC = ITC\'s Michigan Electric Transmission, the Consumers footprint
     ('PPL', r'\bppl\b|louisville gas|\blg&e\b|kentucky utilities|narragansett|rhode island energy'),
-    ('EVRG', r'evergy|westar|kansas city power|kcp&l|kansas gas'),
-    ('ES', r'eversource|connecticut light|\bcl&p\b|nstar|public service co(?:mpany)? of new hampshire|\bpsnh\b'),
-    ('NEE', r'florida power (?:&|and) light|\bfpl\b|gulf power|nextera energy transmission|\bneet\b|lone star transmission'),
+    ('EVRG', r'evergy|westar|kansas city power|kcp&l|kansas gas|^\s*(?:were|kcpl|gmo)\s*$'),   # SPP TO codes (2025 LBNL file)
+    ('ES', r'eversource|connecticut light|\bcl&p\b|nstar|public service co(?:mpany)? of new hampshire|\bpsnh\b|^\s*nu\s*$'),
+    ('NEE', r'florida power (?:&|and) light|\bfpl\b|gulf power|nextera energy transmission|\bneet(?:sw)?\b|lone star transmission'),
     ('PCG', r'pacific gas|\bpg&e\b|\bpge\b(?!\s*portland)'),
     ('EIX', r'southern california edison|\bsce\b'),
     ('POR', r'portland general'),
     ('HE', r'hawaiian electric|\bheco\b|maui electric|hawaii electric light'),
-    ('AQN', r'liberty utilities|empire district|algonquin'),
+    ('AQN', r'liberty utilities|empire district|algonquin|^\s*(?:ede|emde)\s*$'),
 ]
 ACTIVE = re.compile(r'^active|^suspended', re.I)
 
@@ -62,7 +63,7 @@ ACTIVE = re.compile(r'^active|^suspended', re.I)
 def find_file(argv):
     if len(argv) > 2:
         return argv[2]
-    c = [p for d in ('eia_cache', os.path.join('Scans', 'NEW')) for p in glob.glob(os.path.join(DATA, d, '*.xlsx')) if 'queue' in os.path.basename(p).lower()]
+    c = [p for d in ('eia_cache', 'Berkeley Lab', os.path.join('Scans', 'NEW')) for p in glob.glob(os.path.join(DATA, d, '*.xlsx')) if 'queue' in os.path.basename(p).lower()]
     return max(c, key=os.path.getmtime) if c else None
 
 
@@ -174,7 +175,10 @@ def main():
            '_columns': {k: v for k, v in hm.items()},
            '_caveat': ('Berkeley Lab Queued Up project data (a vintage, not live queues). "Active" = active or suspended requests. Attribution '
                        'is by the interconnecting utility / transmission owner named in the data, matched to coverage opcos by name - a '
-                       'request in a name\'s footprint is exposure (network upgrades, load-serving capacity), not ownership.'),
+                       'request in a name\'s footprint is exposure (network upgrades, load-serving capacity), not ownership. '
+                       'Under-count: CAISO, ISO-NE and ERCOT rows mostly name no utility (only the ISO), so PCG, EIX, ES and the Texas '
+                       'opcos are counted only where a utility is printed. CMS is attributed through METC (ITC\'s Michigan Electric '
+                       'Transmission Co.), the transmission owner in the Consumers footprint.'),
            'counts': {'rows': n_all, 'active': n_active, 'active_attributed_to_coverage': n_attr},
            'iso': out_iso, 'tickers': out_tk}
     json.dump(doc, open(os.path.join(DATA, 'interconnection.json'), 'w', encoding='utf-8'), indent=1, default=str)

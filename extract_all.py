@@ -377,6 +377,11 @@ def extract_surprise(ws):
         stripped = label.lstrip()
 
         if any(k in stripped for k in EPS_TRIGGERS) and not label.startswith(' '):
+            # 2026-09-26: take the FIRST EPS block only (EPS Normalized comes first). The sheet can carry a
+            # second 'EPS (GAAP)' block whose quarters are NA; re-entering on it overwrote the normalized
+            # quarters with blanks (EIX and HE showed no 2025 quarterly surprise).
+            if in_eps:
+                break
             in_eps = True
             for ci, pl in zip(col_indices, period_labels):
                 surprise_pct[pl] = safe_float(row[ci]) if ci < len(row) else None
