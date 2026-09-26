@@ -45,6 +45,9 @@ except ImportError:
 
 REPORTS_DIR   = r'E:\PowerAcademy\data\reports'
 CAPIQ_JSON    = r'E:\PowerAcademy\data\capiq_export.json'
+DEAD_KEYS     = ('analyst_rec', 'book_value_ps', 'cfo', 'debt_analysis', 'description', 'div_yield', 'employees',
+                 'eps_est_fy1', 'eps_surprise', 'market_cap', 'pe_ratio', 'price', 'price_book', 'ratings',
+                 'rev_est_fy1', 'shares', 'target_price', 'tev_ebitda', 'water_customers')   # empty on all names 2026-09-26
 EXECS_JSON    = r'E:\PowerAcademy\data\executives_export.json'
 TODAY         = datetime.now().strftime('%m-%d-%Y')
 
@@ -1269,6 +1272,12 @@ def main():
         wb.close()
 
     # ── Write outputs ─────────────────────────────────────────────────────────
+    # 2026-09-26 (Fareen approved): keys that were empty on all 25 names are not carried. Drop any that
+    # is still empty so they never come back through the merge-preserve path; a key that gains data stays.
+    for _co in companies.values():
+        for _k in DEAD_KEYS:
+            if _k in _co and _co[_k] in (None, '', [], {}):
+                del _co[_k]
     capiq['companies'] = companies
     with open(CAPIQ_JSON, 'w', encoding='utf-8') as f:
         json.dump(capiq, f, indent=2, ensure_ascii=False)

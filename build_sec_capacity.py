@@ -24,6 +24,14 @@ summed - the filer's own total is the only total reported. Units: $M.
 import sys, os, re, json, datetime, collections
 import xml.etree.ElementTree as ET
 
+# Filers whose OperatingLossCarryforwards / TaxCreditCarryforwardAmount facts are the tax-effected DTA, confirmed
+# against the printed tax note. The gross carryforward is then NOT disclosed - it is dropped, never guessed.
+TAGGED_DTA_AS_GROSS = {
+    'XIFR': ('Read against the FY2025 10-K tax note (Fareen snip 2026-09-26): XPLR prints NOL carryforwards only as a deferred '
+             'tax asset - $519M (federal $439M + state $80M, before valuation allowance; $294M/$10M of it indefinite-lived) - '
+             'and tax-credit carryforwards as a $33M DTA. The gross (pre-tax) NOL is not disclosed; the XBRL "gross" tags carry '
+             'the DTA figures, so they are shown as DTA here.'),
+}
 DATA = sys.argv[1] if len(sys.argv) > 1 else r'E:\PowerAcademy\data'
 XDIR = os.path.join(DATA, '_sec_xbrl')
 
@@ -173,6 +181,16 @@ def main():
                 seen.add(k); dd.append(r)
         out['tickers'][t] = {'fy_end': fy, 'filed': filed, 'accession': acc, 'source_url': src,
                              'entities': ent, 'detail': dd[:200], 'detail_truncated': max(0, len(dd) - 200)}
+        if t in TAGGED_DTA_AS_GROSS:                           # read against the tax note: the 'gross' tag is the DTA
+            for e, ks in ent.items():
+                for gk, dk in (('nol_gross', 'nol_dta'), ('tax_credit_cf', 'tax_credit_dta')):
+                    if gk in ks and (ks.get(dk) or {}).get('value') == ks[gk].get('value'):
+                        del ks[gk]
+            for r in dd:
+                if r['key'] in ('nol_gross', 'tax_credit_cf'):
+                    r['key'] = {'nol_gross': 'nol_dta', 'tax_credit_cf': 'tax_credit_dta'}[r['key']]
+                    r['note'] = 'tagged OperatingLossCarryforwards/TaxCreditCarryforwardAmount but printed as a deferred tax asset'
+            out['tickers'][t]['notes'] = [TAGGED_DTA_AS_GROSS[t]]
         qc = []
         for e, ks in ent.items():
             g2, d2 = (ks.get('nol_gross') or {}).get('value'), (ks.get('nol_dta') or {}).get('value')

@@ -13,6 +13,15 @@ ALIAS = {  # SEC name -> FERC respondent name (renamed entities)
     'evergy kansas central': 'westar energy',
     'evergy metro': 'kansas city power light',
 }
+# Breaks read against the source and explained - kept in the report, tagged so they stop reading as open.
+EXPLAINED = {
+    ('NEE', 'florida power light', 2019): 'Gulf Power restatement (confirmed 2026-09-26 off the FY2021 10-K segment table): the SEC '
+        'figure is FPL consolidated incl. Gulf Power (2,519 = FPL segment 2,334 + Gulf 180 + other 5); the FPL segment alone '
+        '(2,334) ties to FERC. FERC Form 1 is FPL-only for 2019.',
+    ('NEE', 'florida power light', 2020): 'Gulf Power restatement (confirmed 2026-09-26 off the FY2021 10-K segment table): the SEC '
+        'figure is FPL consolidated incl. Gulf Power (2,890 = FPL segment 2,650 + Gulf 238 + other 2); the FPL segment alone '
+        '(2,650) ties to FERC. FERC Form 1 is FPL-only for 2020.',
+}
 def n(x):
     x = re.sub(r'\(.*?\)', '', x.lower())
     x = re.sub(r'\b(company|co|inc|corporation|corp|llc|the)\b|[.,&]', ' ', x)
@@ -38,8 +47,12 @@ for t, v in sec['tickers'].items():
             rows.append({'ticker': t, 'opco': e['name'], 'year': int(y), 'sec_ni_m': round(sv, 1),
                          'ferc_ni_m': round(fm, 1), 'diff_pct': None if d is None else round(d, 2)})
 breaks = [r for r in rows if r['diff_pct'] is None or abs(r['diff_pct']) > TOL]
+for r in breaks:
+    why = EXPLAINED.get((r['ticker'], n(r['opco']), r['year']))
+    if why: r['explained'] = why
 out = {'_generated': datetime.date.today().isoformat(), '_tolerance_pct': TOL,
        'pairs': len(rows), 'within': len(rows) - len(breaks), 'breaks': breaks,
+       'explained': sum(1 for r in breaks if r.get('explained')),
        'unmatched_sec_entities': unmatched,
        'by_year': {y: {'pairs': sum(r['year'] == y for r in rows), 'breaks': sum(r['year'] == y for r in breaks)}
                    for y in sorted({r['year'] for r in rows})}}
@@ -48,5 +61,5 @@ out = {'_generated': datetime.date.today().isoformat(), '_tolerance_pct': TOL,
 print(f"{out['pairs']} opco-years, {out['within']} within {TOL}%")
 for y, c in out['by_year'].items(): print(f'  {y}: {c["pairs"]} pairs, {c["breaks"]} breaks')
 for b in sorted(breaks, key=lambda r: (r['ticker'], r['opco'], r['year'])):
-    print(f"  {b['ticker']:5} {b['opco'][:38]:38} {b['year']}  SEC {b['sec_ni_m']:>9}  FERC {b['ferc_ni_m']:>9}  {b['diff_pct']:+.1f}%")
+    print(f"  {b['ticker']:5} {b['opco'][:38]:38} {b['year']}  SEC {b['sec_ni_m']:>9}  FERC {b['ferc_ni_m']:>9}  {b['diff_pct']:+.1f}%{'  [explained]' if b.get('explained') else ''}")
 print('unmatched:', unmatched)

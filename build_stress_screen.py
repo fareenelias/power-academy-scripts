@@ -13,7 +13,8 @@ the file it came from. Thresholds live HERE (retune here, never in the UI).
                                  last filed plan year = 1
   activist     ownership.json    a non-proxy-proposal campaign (board representation, strategic,
                                  vote-no) launched in the last 3 years = 2; ESG/governance proposals only = 0
-  market       issuance.json     median new-issue yield >= +40 bp vs contemporaneous peers = 1
+  market       issuance.json     median new-issue yield >= +40 bp vs contemporaneous peers = 1, on
+                                 deals since 2021 when >= 2 are scored, else the full 2000 -> history
 
     python scripts\build_stress_screen.py          (Windows default path)
     python scripts/build_stress_screen.py <data_dir>
@@ -91,6 +92,8 @@ def main():
             add('capex', 1, f"newest plan {fw.get('window')} is {su}x the FY{min(fw.get('run_rate_years') or [0])}-{max(fw.get('run_rate_years') or [0])} capex run-rate", 'cashflow_vs_plan.json')
         last = None
         for w in c.get('windows') or []:
+            if w.get('superseded_scope'):              # plan set before a divestiture (AQN renewables sale)
+                continue
             for y in w.get('years') or []:
                 if y.get('capex_delivery_pct') is not None and (last is None or y['year'] > last['year']):
                     last = y
@@ -112,9 +115,12 @@ def main():
             add('activist', 2, '; '.join(hot[:3]), 'ownership.json')
         if not own.get(t):
             gaps.append('no CapIQ ownership sheet')
-        m = ((iss.get(t) or {}).get('summary') or {}).get('median_vs_peers_bps')
+        su = (iss.get(t) or {}).get('summary') or {}
+        rec = (su.get('n_scored_recent') or 0) >= 2
+        m = su.get('median_vs_peers_bps_recent') if rec else su.get('median_vs_peers_bps')
         if isinstance(m, (int, float)) and m >= 40:
-            add('market', 1, f'new-issue debt prices a median {m:+d} bp vs contemporaneous coverage peers', 'issuance.json')
+            win = f"{(su.get('n_scored_recent'))} deals since {su.get('recent_from', '2021')[:4]}" if rec else f"{su.get('n_scored')} deals, full history"
+            add('market', 1, f'new-issue debt prices a median {m:+d} bp vs contemporaneous coverage peers ({win})', 'issuance.json')
         score = sum(s['points'] for s in sig)
         out['names'][t] = {'score': score, 'tier': 'high' if score >= 4 else ('elevated' if score >= 2 else 'low'),
                            'lenses': sorted({s['lens'] for s in sig}), 'signals': sig, 'gaps': gaps}

@@ -175,17 +175,17 @@ def build():
             recent = {y: a for y, a in ann.items() if y >= '2024'}
             hold = sum(a.get('debt_holdco_usd_m', 0) for a in recent.values()); sub = sum(a.get('debt_sub_usd_m', 0) for a in recent.values())
             eq_events = [x for x in o.get('rows', []) if x.get('funding_type') == 'Common Stock' and x.get('status') == 'Priced' and not x.get('duplicate_of') and (x.get('announce_date') or '') >= '2024']
-            cov = [a.get('offerings_debt_coverage_pct') for a in ann.values() if a.get('offerings_debt_coverage_pct') is not None]
+            cov = [a.get('offerings_debt_coverage_pct') for y, a in ann.items() if y >= '2021' and a.get('offerings_debt_coverage_pct') is not None]
             r['offerings'] = collections.OrderedDict([
                 ('since', '2024'), ('holdco_debt_b', round(hold / 1000, 2)), ('opco_debt_b', round(sub / 1000, 2)),
                 ('opco_share_pct', round(100 * sub / (hold + sub)) if (hold + sub) else None),
-                ('equity_events', [dict(date=x['announce_date'], issuer=x['issuer'], type=x.get('offering_type'), size_b=round((x.get('size_k') or 0) / 1e6, 2), price=x.get('offering_price')) for x in eq_events]),
-                ('coverage_vs_filed_pct', dict(min=min(cov), max=max(cov)) if cov else None),
+                ('equity_events', [dict(date=x['announce_date'], issuer=x['issuer'], type=x.get('offering_type'), size_b=round(x['size_usd_m'] / 1000, 2) if x.get('size_usd_m') is not None else round((x.get('size_k') or 0) / 1e6, 2), price=x.get('offering_price')) for x in eq_events]),
+                ('coverage_vs_filed_pct', dict(min=min(cov), max=max(cov), years='2021+') if cov else None),
                 ('workbook_date', o.get('workbook_date')),
                 ('note', 'CapIQ deal-database coverage, not the filed financing - texture only; coverage_vs_filed_pct says how much of the filed LT debt it sees')])
         else:
             r['offerings'] = None
-            r['offerings_note'] = 'no Detailed Offerings tab for this name in CapIQ (not available, per 2026-09-23 export)'
+            r['offerings_note'] = 'no Detailed Offerings rows for this name in offerings.json (all 25 names were pulled 2026-09-26 - re-run extract_offerings.py)'
         # the gap
         gp = collections.OrderedDict()
         cp = (r['capex_plan'] or {}).get('per_yr_b'); ip = (r['filed'] or {}).get('internal_per_yr_b'); hx = (r['filed'] or {}).get('external_per_yr_b')

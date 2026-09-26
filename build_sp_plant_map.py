@@ -12,6 +12,11 @@ plant in the S&P export is matched to EIA-860 plant code(s) + technology group:
     S&P solar row and battery row at one EIA hybrid carry their own ownership %.
 Unaccepted plants are listed in 'unmatched' with their best candidates - review, then add to MANUAL.
 
+PIPELINE (2026-09-26): S&P 'Planned' / 'Operating & Planned' US plants are matched the same way against the
+EIA-860 PROPOSED generator sheet (same state, name tokens, technology group, planned MW within 15%). Output
+'pipeline' - build_fleet.py credits those EIA proposed plant codes to the ticker's pipeline, which is how NEER
+projects that file under their own project-LLC utility ids get counted. 'pipeline_unmatched' lists the rest.
+
 build_fleet.py (SP_AUTHORITATIVE) uses the output as the owned-view source for the ticker.
 
   python build_sp_plant_map.py              # all configured tickers
@@ -81,7 +86,9 @@ MANUAL = {
 }
 CONFIG = {
     'XIFR': {'glob': 'SPGlobal_XPLR*PowerPlants*.xlsx', 'out': 'xplr_plant_map.json'},
-    'NEE': {'glob': 'SPGlobal_NextEraEnergy*PowerPlants*.xlsx', 'out': 'nee_plant_map.json'},
+    # ',Inc.' matters: the NextEra Energy Resources, LLC export (2026-09-26) also matches 'NextEraEnergy*' and sorts
+    # last, and it is a strict SUBSET of the NextEra Energy, Inc. list (710 of its 976 plants, nothing new).
+    'NEE': {'glob': 'SPGlobal_NextEraEnergy,Inc.*PowerPlants*.xlsx', 'out': 'nee_plant_map.json'},
 }
 
 STOP = set(('wind solar farm farms project projects energy center centre power plant llc lp inc facility the of '
@@ -123,6 +130,72 @@ def eia_plants():
         p['mw'] += mw; p['g'][group(d['Technology'])] += mw
     return P
 
+def eia_proposed():
+    z = zipfile.ZipFile(EIA_ZIP)
+    gname = next(n for n in z.namelist() if n.startswith('3_1_Generator'))
+    wb = openpyxl.load_workbook(io.BytesIO(z.read(gname)), read_only=True)
+    hdr, Q = None, {}
+    for r in wb['Proposed'].iter_rows(values_only=True):
+        if hdr is None:
+            if r and r[0] == 'Utility ID': hdr = [str(c).strip() if c else '' for c in r]
+            continue
+        if not r or r[0] in (None, ''): continue
+        d = dict(zip(hdr, r))
+        code = str(d['Plant Code']).split('.')[0]
+        q = Q.setdefault(code, {'name': d['Plant Name'], 'state': d['State'], 'op': d['Utility Name'],
+                                'op_id': str(d['Utility ID']).split('.')[0], 'mw': 0.0, 'g': collections.Counter()})
+        try: mw = float(d['Nameplate Capacity (MW)'] or 0)
+        except (TypeError, ValueError): mw = 0.0
+        q['mw'] += mw; q['g'][group(d['Technology'])] += mw
+    return Q
+
+def match_pipeline(S, Q, ticker, foreign):
+    byst = collections.defaultdict(list)
+    for code, q in Q.items(): byst[q['state']].append((code, q))
+    got, miss = [], []
+    for r in S:
+        if r['Operating Status'] not in ('Planned', 'Operating & Planned') or r.get('Country') != 'USA':
+            continue
+        name, st = r['Power Plant Name'], r['State, Province, or Admin Region']
+        pct = fnum(r.get('Planned Ownership (%)')) or fnum(r.get('Operating Ownership (%)'))
+        owned = fnum(r.get('Owned Planned Capacity (MW)'))
+        if not pct or not owned:
+            continue
+        tot = owned / (pct / 100.0)
+        gs = PM_GROUPS.get(r['Prime Mover'], None)
+        best = []
+        for code, q in byst.get(st, []):
+            gmw = sum(v for g, v in q['g'].items() if gs is None or g in gs)
+            if gmw <= 0: continue
+            qt = set(toks(q['name'])); sc = 0.0
+            for v in variants(name):
+                vt = set(toks(v))
+                if vt and qt: sc = max(sc, len(vt & qt) / len(vt | qt))
+            if sc == 0: continue
+            if numerals(name) != numerals(q['name']): sc -= 0.15
+            jac = sc
+            cap = abs(gmw - tot) <= max(5.0, 0.15 * tot)
+            if cap: sc += 0.3
+            best.append((round(sc, 2), code, cap, round(gmw, 1), round(jac, 2)))
+        best.sort(reverse=True)
+        ok = best and (best[0][4] >= 0.6 or (best[0][4] >= 0.34 and best[0][2])) and (len(best) < 2 or best[1][0] <= best[0][0] - 0.1)
+        why = None
+        if ok and Q[best[0][1]]['op_id'] in foreign:
+            ok, why = False, 'EIA proposed operator id belongs to %s' % foreign[Q[best[0][1]]['op_id']]
+        rec = {'sp_name': name, 'sp_key': r['Power Plant Key'], 'state': st, 'status': r['Operating Status'],
+               'pct': pct, 'sp_owned_planned_mw': owned, 'sp_total_planned_mw': round(tot, 1),
+               'sp_operator': r.get('Operator'), 'prime_mover': r['Prime Mover']}
+        if not ok:
+            rec.update(why=why, candidates=[{'plant_code': c, 'plant': Q[c]['name'], 'score': s_, 'name_jaccard': j, 'tech_mw': m, 'cap_ok': cp}
+                                            for s_, c, cp, m, j in best[:3]])
+            miss.append(rec); continue
+        code = best[0][1]
+        rec.update(eia=[{'plant_code': code, 'plant': Q[code]['name'], 'eia_operator': Q[code]['op'],
+                         'tech': gs if len([g for g, v in Q[code]['g'].items() if v > 0]) > 1 else None}],
+                   eia_proposed_mw=best[0][3], cap_check='ok' if best[0][2] else 'MISMATCH', score=best[0][0])
+        got.append(rec)
+    return got, miss
+
 def sp_rows(path):
     ws = openpyxl.load_workbook(path, read_only=True, data_only=True).worksheets[0]
     rows = list(ws.iter_rows(values_only=True))
@@ -136,7 +209,7 @@ def sp_rows(path):
 def fnum(v):
     return float(v) if isinstance(v, (int, float)) else None
 
-def build(ticker, P):
+def build(ticker, P, Q=None):
     cfg = CONFIG[ticker]
     path = sorted(glob.glob(os.path.join(BASE, 'data', 'eia_cache', cfg['glob'])))[-1]
     S = sp_rows(path)
@@ -203,6 +276,11 @@ def build(ticker, P):
         ('_source', 'S&P Global Market Intelligence "Power Plants" export %s (data/eia_cache), supplied by Fareen' % os.path.basename(path)),
         ('_method', __doc__.split('Unaccepted')[0].split('plant code(s) + technology group:')[1].strip()),
         ('ticker', ticker), ('plants', plants), ('unmatched', unmatched), ('skipped', skipped)])
+    if Q is not None:
+        pipe, pmiss = match_pipeline(S, Q, ticker, foreign)
+        doc['pipeline'] = pipe; doc['pipeline_unmatched'] = pmiss
+        print('%s pipeline: %d S&P planned plants matched to EIA proposed (%.0f MW owned) | %d unmatched (%.0f MW)' % (
+            ticker, len(pipe), sum(x['sp_owned_planned_mw'] for x in pipe), len(pmiss), sum(x['sp_owned_planned_mw'] for x in pmiss)))
     out = os.path.join(BASE, 'data', cfg['out'])
     with open(out, 'w', encoding='utf-8') as fh:
         json.dump(doc, fh, indent=1, ensure_ascii=False)
@@ -212,6 +290,6 @@ def build(ticker, P):
         len(unmatched), mw(unmatched, 'sp_owned_mw'), len(skipped), sum(1 for p in plants if p['cap_check'] == 'MISMATCH'), out))
 
 if __name__ == '__main__':
-    P = eia_plants()
+    P = eia_plants(); Q = eia_proposed()
     for t in (sys.argv[1:] or list(CONFIG)):
-        build(t, P)
+        build(t, P, Q)

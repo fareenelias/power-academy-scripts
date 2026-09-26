@@ -29,6 +29,15 @@ import os, sys, json, re, datetime as dt
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# A divestiture that changes what the capex plan covers. Windows printed BEFORE the change are kept for the
+# record but marked superseded_scope and never judged (no flag, no stress-screen point); the forward run-rate
+# uses filed years from the change year on. Add a row here when a name sells a business its plans included.
+SCOPE_CHANGES = {
+    'AQN': {'from_year': 2025, 'note': 'AQN sold its renewable energy business (ex-hydro) in January 2025. The 2021-2025 '
+            '($9.4B) and 2022-2026 ($12.4B) plans included it, so filed capex after the sale cannot be measured against '
+            'them; the regulated-only plan is 2026-2028 (~$3.2B, Q4 2025 deck) and has no filed year yet.'},
+}
+
 
 def r1(x): return None if x is None else round(x, 2)
 
@@ -56,6 +65,9 @@ def main():
              ('cfo_b', 'dividends_b', 'capex_b', 'lt_debt_issued_b', 'lt_debt_repaid_b', 'equity_issued_b')}
         decks = [(p, v) for p, v in rows.items() if not p.startswith('_') and isinstance(v, dict)]
         scope_note = ((fg.get(t) or {}).get('capex_plan') or {}).get('note')
+        sc_chg = SCOPE_CHANGES.get(t)
+        if sc_chg:
+            scope_note = (scope_note + ' ' if scope_note else '') + sc_chg['note']
         windows = []
         for v in vint:
             m = re.match(r'(\d{4})\s*-\s*(\d{4})', v.get('window') or '')
@@ -103,11 +115,16 @@ def main():
                     si = sum(r['internal_after_div_b'] for r in yrows)
                     cum.update({'internal_after_div_b': r1(si), 'plan_internal_b': r1(int_pace * len(yrows)),
                                 'internal_vs_plan_pct': pct(si, int_pace * len(yrows))})
-            windows.append({'window': v['window'], 'total_b': v.get('total_b'), 'per_year_b': v['per_year_b'],
-                            'basis': v.get('basis'), 'last_stated': v.get('last_stated'), 'financing_plan': fin,
-                            'years': yrows, 'cumulative': cum})
+            w = {'window': v['window'], 'total_b': v.get('total_b'), 'per_year_b': v['per_year_b'],
+                 'basis': v.get('basis'), 'last_stated': v.get('last_stated'), 'financing_plan': fin,
+                 'years': yrows, 'cumulative': cum}
+            ls = re.search(r'(\d{4})', v.get('last_stated') or '')
+            if sc_chg and ls and int(ls.group(1)) < sc_chg['from_year']:
+                w['superseded_scope'] = sc_chg['note']
+            windows.append(w)
         # forward look: the newest window vs the run-rate actually achieved (last 3 filed years)
-        last3 = [y for y in sorted(F['capex_b']) if F['capex_b'][y] is not None][-3:]
+        last3 = [y for y in sorted(F['capex_b']) if F['capex_b'][y] is not None
+                 and (not sc_chg or y >= sc_chg['from_year'])][-3:]
         run_capex = sum(-F['capex_b'][y] for y in last3) / len(last3) if last3 else None
         run_int = None
         if last3 and all(F['cfo_b'].get(y) is not None for y in last3):
@@ -127,7 +144,8 @@ def main():
         flags = []
         # judge on the window with the MOST realized years (ties -> newest): early years of a plan are the
         # weakest evidence because most plans are back-weighted
-        cums = [w['cumulative'] for w in windows if w['cumulative'] and len(w['cumulative']['years']) >= 2]
+        cums = [w['cumulative'] for w in windows if w['cumulative'] and len(w['cumulative']['years']) >= 2
+                and not w.get('superseded_scope')]
         if cums:
             c = max(enumerate(cums), key=lambda ic: (len(ic[1]['years']), ic[0]))[1]
             if c['capex_delivery_pct'] is not None and c['capex_delivery_pct'] < 90:

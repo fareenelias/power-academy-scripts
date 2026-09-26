@@ -63,6 +63,17 @@ def load_sp_maps():
                 m[str(e['plant_code'])].append((tf, float(pct) / 100.0, p['sp_name'], p.get('sp_operator') or ''))
         out[t] = m
     return out
+def load_sp_pipeline():
+    """ticker -> {EIA proposed plant code: S&P plant name} from the map files' 'pipeline' (build_sp_plant_map.py),
+    plus ticker -> S&P planned plants with no EIA-860 proposed match (reported, never added to EIA totals)."""
+    codes, extra = {}, {}
+    for t, cfg in SP_AUTHORITATIVE.items():
+        if not os.path.exists(cfg['file']):
+            continue
+        d = json.load(open(cfg['file'], encoding='utf-8'))
+        codes[t] = {e['plant_code']: p['sp_name'] for p in d.get('pipeline', []) for e in p.get('eia', [])}
+        extra[t] = d.get('pipeline_unmatched', [])
+    return codes, extra
 def sp_share(spm, t, plant, g):
     for tf, f, n, _ in spm.get(t, {}).get(plant, ()):
         if tf is None or g in tf:
@@ -320,8 +331,15 @@ def main():
                                         'mw': round(mw, 1), 'online': oy, 'age': (AS_OF_YEAR - oy) if oy else None,
                                         'retire_year': ry, 'status': r.get('Status')})
 
+    pipe_codes, pipe_extra = load_sp_pipeline()
+    pipe_added = collections.defaultdict(lambda: collections.Counter())
     for r in sheet_rows(wb, 'Proposed'):
-        ts = sp_filter(spm, uid2t.get(str(r.get('Utility ID')).strip().split('.')[0]), str(r.get('Plant Code')).split('.')[0])
+        pc = str(r.get('Plant Code')).split('.')[0]
+        ts = sp_filter(spm, uid2t.get(str(r.get('Utility ID')).strip().split('.')[0]), pc)
+        for t, cm in pipe_codes.items():        # S&P-listed project (NEER project LLCs file under their own EIA ids)
+            if pc in cm and t not in (ts or set()):
+                ts = set(ts or ()) | {t}
+                pipe_added[t][cm[pc]] += num(r.get('Nameplate Capacity (MW)')) or 0.0
         if not ts:
             continue
         mw = num(r.get('Nameplate Capacity (MW)')) or 0.0
@@ -394,6 +412,21 @@ def main():
             'perf': perf.get(t),
             'utility_ids': (idmap.get(t) or {}).get('utility_ids'),
         }
+        if t in pipe_codes:
+            ex = pipe_extra.get(t) or []
+            exg = collections.Counter()
+            for e in ex:
+                exg[e.get('prime_mover') or 'n/a'] += e.get('sp_owned_planned_mw') or 0.0
+            doc['tickers'][t]['pipeline_sp'] = {
+                'added_from_sp_mw': R(sum(sum(c.values()) for c in [pipe_added[t]])),
+                'added_projects': len(pipe_added[t]),
+                'sp_planned_not_in_eia_mw': R(sum(exg.values())),
+                'sp_planned_not_in_eia_projects': len(ex),
+                'sp_planned_not_in_eia_by_prime_mover': {k: R(v) for k, v in exg.most_common()},
+                'note': ('EIA-860 proposed units at plants the S&P Global plant list names as %s projects are counted in proposed_mw '
+                         '(added_from_sp_mw of it came only through the S&P list - project LLCs filing under their own EIA ids). '
+                         'sp_planned_not_in_eia_mw is S&P planned owned capacity with no EIA-860 proposed filing yet - earlier-stage '
+                         'backlog, shown beside proposed_mw and never added to it.' % t)}
     doc['_perf_qc'] = perf_qc
     doc['_sp_qc'] = {'overlapping_claims_scaled': sp_qc[:50], 'n_overlaps': len(sp_qc)}
     for st_t, cfg in SP_AUTHORITATIVE.items():
