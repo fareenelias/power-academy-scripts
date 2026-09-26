@@ -5,13 +5,46 @@ fetch_sec_xbrl.py downloads into data\_sec_xbrl\.
 
   python build_sec_opco.py [--xbrl DIR] [--out data\sec_opco.json]
 
+History (2026-09-25): reads every 10-K the manifest lists per registrant - the latest plus the FY2023/2021/2019
+10-Ks that `fetch_sec_xbrl.py --history` adds - newest first, so a restated year keeps the NEWER filing's
+figure. Co-registrants are keyed by CIK via the dei:EntityCentralIndexKey tag each combined 10-K puts on its
+LegalEntityAxis members (member names drift between years; CIKs do not). REGISTRANT_MEMBERS is the fallback
+for a filing that lacks those tags. Each entity's `years` covers only the years actually on disk.
+
 Why the instance document: in a combined 10-K each co-registrant's facts are dimensioned by
 dei:LegalEntityAxis; companyfacts serves only undimensioned (parent) facts.
 Rules (Fareen 2026-09-21): all SEC-registrant opcos; segment ROE COMPUTED with a stated capital
 allocation and labelled derived; FERC (jurisdictional) and SEC (managerial) views never mixed.
 """
 import os, sys, json, re, collections, datetime as dt
-from lxml import etree
+try:                                   # lxml is faster; the stdlib parser is the fallback (no pip needed)
+    from lxml import etree
+    _LXML = True
+except ImportError:
+    import xml.etree.ElementTree as etree
+    _LXML = False
+
+
+def _split(tag):
+    if tag[:1] == '{':
+        ns, ln = tag[1:].split('}', 1)
+        return ln, ns
+    return tag, ''
+
+
+def _iter(path):
+    """yield (localname, namespace, element, uri->prefix) at each element end, lxml or stdlib."""
+    if _LXML:
+        for ev, el in etree.iterparse(path, events=('end',), huge_tree=True):
+            ln, ns = _split(el.tag)
+            yield ln, ns, el, {v: k for k, v in (el.nsmap or {}).items()}
+    else:
+        pref = {}
+        for ev, el in etree.iterparse(path, events=('start-ns', 'end')):
+            if ev == 'start-ns':
+                pref.setdefault(el[1], el[0]); continue
+            ln, ns = _split(el.tag)
+            yield ln, ns, el, pref
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -102,29 +135,31 @@ SEG_METRICS = [
             'us-gaap:PaymentsToAcquireProductiveAssets']),
  ('total_assets', ['us-gaap:Assets']),
 ]
-YEARS = [2023, 2024, 2025]
+YEARS = list(range(2017, 2026))   # FY2019 10-K prints income 2017-19; entity `years` trims to what is on disk
 SEG_AXIS = 'us-gaap:StatementBusinessSegmentsAxis'
 LE_AXIS = 'dei:LegalEntityAxis'
 OK_EXTRA_AXES = {'srt:ConsolidationItemsAxis'}   # OperatingSegmentsMember etc. - harmless on segment facts
 
 
 def parse(path):
-    ctxs, facts, nsmap = {}, [], {}
-    for ev, el in etree.iterparse(path, events=('end',), huge_tree=True):
-        q = etree.QName(el.tag); ln, ns = q.localname, q.namespace or ''
+    """-> (contexts, numeric facts, {LegalEntityAxis member or '': CIK int})"""
+    ctxs, facts, ciks = {}, [], []
+    for ln, ns, el, pref_map in _iter(path):
         if ln == 'context':
             c = {'dims': {}}
             for x in el.iter():
-                l = etree.QName(x.tag).localname
+                l = _split(x.tag)[0]
                 if l == 'startDate': c['start'] = x.text.strip()
                 elif l == 'endDate': c['end'] = x.text.strip()
                 elif l == 'instant': c['instant'] = x.text.strip()
                 elif l == 'explicitMember': c['dims'][x.get('dimension')] = x.text.strip()
                 elif l == 'typedMember': c['dims'][x.get('dimension')] = 'typed'
             ctxs[el.get('id')] = c; el.clear()
+        elif ln == 'EntityCentralIndexKey' and el.get('contextRef') is not None and el.text:
+            ciks.append((el.get('contextRef'), el.text.strip())); el.clear()
         elif el.get('contextRef') is not None:
             if el.text is not None and len(el) == 0 and el.get('unitRef'):
-                pre = next((k for k, v in (el.nsmap or {}).items() if v == ns), ns)
+                pre = pref_map.get(ns, ns)
                 try:
                     v = float(el.text.strip())
                     if el.get('sign') == '-': v = -v
@@ -132,7 +167,13 @@ def parse(path):
                 except ValueError:
                     pass
             el.clear()
-    return ctxs, facts
+    member_cik = {}
+    for cref, cik in ciks:
+        try:
+            member_cik[ctxs.get(cref, {}).get('dims', {}).get(LE_AXIS, '')] = int(cik)
+        except ValueError:
+            pass
+    return ctxs, facts, member_cik
 
 
 def fy(c, instant):
@@ -183,9 +224,11 @@ def pick(store, key_prefix, concepts, y, inst):
     return None, None
 
 
-def entity_block(ent, le, label, role, src, ticker=''):
+def entity_block(ent, le, label, role, src, ticker='', parent_key='', ov_key=None):
+    """le = entity key in `ent` (a CIK after the multi-filing merge); parent_key = the parent's key;
+    ov_key = LegalEntityAxis member ('' for the parent) used to look up OVERRIDES."""
     out = {'name': label, 'role': role, 'source': src, 'years': YEARS, 'metrics': {}, 'concepts': {}}
-    ov = OVERRIDES.get((ticker, le), {})
+    ov = OVERRIDES.get((ticker, le if ov_key is None else ov_key), {})
     for m, cons in METRICS:
         inst = m in INSTANT
         cons = ov.get(m, cons)
@@ -194,7 +237,7 @@ def entity_block(ent, le, label, role, src, ticker=''):
             v = con = None
             for cc in cons:
                 if cc.startswith('@parent:'):
-                    v = ent.get(('', cc[8:], y, inst)); con = cc[8:]
+                    v = ent.get((parent_key, cc[8:], y, inst)); con = cc[8:]
                 else:
                     v, con = pick(ent, (le,), [cc], y, inst)
                 if v is not None: break
@@ -269,58 +312,138 @@ def main():
     man = json.load(open(os.path.join(xdir, '_manifest.json'), encoding='utf-8'))['tickers']
     files = {f[:20]: os.path.join(xdir, f) for f in os.listdir(xdir) if f.endswith('.xml')}
     result = collections.OrderedDict()
-    done_acc = set()
+    cache = {}
+
+    def load(acc):
+        if acc not in cache:
+            c, f, mc = parse(files[acc])
+            ent, seg = index(c, f)
+            cache[acc] = (ent, seg, mc)
+        return cache[acc]
+
     for t in sorted(man):
-        parent = next((r for r in man[t] if r['role'] == 'parent' and r.get('accession')), None)
-        accs = []
-        if parent: accs.append((parent['accession'], 'parent'))
-        ciks = {parent['accession']: parent['cik']} if parent else {}
-        for r in man[t]:
+        recs = man[t]
+        parent = next((r for r in recs if r['role'] == 'parent' and r.get('accession')), None)
+        known = {r['cik']: r['name'] for r in recs if r.get('cik')}
+
+        def name_cik(nm, _k=known):
+            key = re.sub(r'[^a-z]', '', nm.lower())[:14]
+            return next((c for c, n in _k.items() if re.sub(r'[^a-z]', '', (n or '').lower()).startswith(key)), None)
+        # filing groups: the parent's filings (latest + history), and each standalone opco's own filings
+        groups = []
+        if parent:
+            accs = [parent['accession']] + [h['accession'] for h in parent.get('history', []) if h.get('accession')]
+            groups.append(('parent', parent['cik'], accs))
+        for r in recs:
             if r['role'] == 'opco' and r.get('accession') in STANDALONE_OPCO_FILES:
-                accs.append((r['accession'], 'standalone')); ciks[r['accession']] = r['cik']
+                accs = [r['accession']] + [h['accession'] for h in r.get('history', []) if h.get('accession')]
+                groups.append(('standalone', r['cik'], accs))
         blk = {'ticker': t, 'entities': [], 'segments': {}, 'sources': []}
-        for acc, kind in accs:
-            if (t, acc) in done_acc or acc not in files: continue
-            done_acc.add((t, acc))
-            ctxs, facts = parse(files[acc])
-            ent, seg = index(ctxs, facts)
-            src = {'accession': acc, 'file': os.path.basename(files[acc]),
-                   'url': f'https://www.sec.gov/Archives/edgar/data/{ciks.get(acc, "")}/{acc.replace("-", "")}/'}
-            blk['sources'].append(src)
-            if kind == 'standalone':
-                label = STANDALONE_OPCO_FILES[acc][1]
-                e = entity_block(ent, '', label, 'opco', src['file'], t)
-                blk['entities'].append(e)
-                blk['segments'][label] = segment_blocks(seg, '', e['metrics']['equity'], e['metrics']['net_income'])
+        for kind, gcik, accs in groups:
+            accs = [a for a in accs if a in files]           # newest first: latest 10-K, then FY23/21/19
+            if not accs:
                 continue
-            plabel = PARENT_IS_OPCO.get(t, t + ' (consolidated)')
-            pe = entity_block(ent, '', plabel, 'opco' if t in PARENT_IS_OPCO else 'parent', src['file'], t)
-            blk['entities'].append(pe)
-            blk['segments'][plabel] = segment_blocks(seg, '', pe['metrics']['equity'], pe['metrics']['net_income'])
-            for mem, label in REGISTRANT_MEMBERS.get(t, {}).items():
-                e = entity_block(ent, mem, label, 'opco', src['file'], t)
-                if not any(v is not None for mv in e['metrics'].values() for v in mv.values()):
-                    e['note'] = 'member present in filing map but no undimensioned facts found'
+            # merged stores keyed by CIK; the NEWER filing wins where years overlap (restatements)
+            ent_m, seg_m, used = {}, {}, collections.OrderedDict()
+            for acc in accs:
+                ent, seg, mc = load(acc)
+                if kind == 'standalone':
+                    # an older year may have been filed INSIDE the parent's combined 10-K: then take only
+                    # this registrant's LegalEntityAxis member, never the file's undimensioned (parent) facts
+                    if not mc or mc.get('') == gcik:
+                        mc = {'': gcik}
+                    else:
+                        mem_ = next((m for m, c in mc.items() if c == gcik and m), None)
+                        if mem_ is None:
+                            continue
+                        mc = {mem_: gcik}
+                else:
+                    # older filings may not tag dei:EntityCentralIndexKey per member: fall back to the
+                    # explicit member map, matched to the manifest CIK by registrant name
+                    mc = dict(mc)
+                    for mem, nm in REGISTRANT_MEMBERS.get(t, {}).items():
+                        if mem not in mc:
+                            c = name_cik(nm)
+                            if c: mc[mem] = c
+                for (le, con, y, inst), v in ent.items():
+                    cik = mc.get(le) if kind == 'standalone' else (mc.get(le) or (gcik if le == '' else None))
+                    if cik is None:
+                        continue
+                    ent_m.setdefault((cik, con, y, inst), v)
+                    used.setdefault(cik, set()).add(acc)
+                for (le, sm, con, y, inst), v in seg.items():
+                    cik = mc.get(le) if kind == 'standalone' else (mc.get(le) or (gcik if le == '' else None))
+                    if cik is None:
+                        continue
+                    seg_m.setdefault((cik, sm, con, y, inst), v)
+                blk['sources'].append({'accession': acc, 'file': os.path.basename(files[acc]),
+                                       'url': f'https://www.sec.gov/Archives/edgar/data/{gcik}/{acc.replace("-", "")}/'})
+            latest_mc = {'': gcik} if kind == 'standalone' else load(accs[0])[2]
+            if kind == 'parent':
+                pref = [latest_mc[m] for m in REGISTRANT_MEMBERS.get(t, {}) if m in latest_mc]
+                order = [gcik] + list(dict.fromkeys(pref + [c for c in latest_mc.values() if c != gcik]))
+                order = [c for i, c in enumerate(order) if c != gcik or i == 0]
+            else:
+                order = [gcik]
+            for cik in order:
+                if cik == gcik and kind == 'parent':
+                    label = PARENT_IS_OPCO.get(t, t + ' (consolidated)')
+                    role = 'opco' if t in PARENT_IS_OPCO else 'parent'
+                else:
+                    mem = next((m for m, c in latest_mc.items() if c == cik), '')
+                    label = (REGISTRANT_MEMBERS.get(t, {}).get(mem) or known.get(cik)
+                             or re.sub(r'([a-z])([A-Z])', r'\1 \2', mem.split(':')[-1].replace('Member', '')))
+                    label = re.sub(r'\s*\(pudl determined\)', '', label).strip()
+                    if label and label[0].islower(): label = label.title()
+                    role = 'opco'
+                    if kind == 'standalone':
+                        label = STANDALONE_OPCO_FILES.get(accs[0], (t, label))[1]
+                mem = '' if cik == gcik else next((m for m, c in latest_mc.items() if c == cik), None)
+                e = entity_block(ent_m, cik, label, role, os.path.basename(files[accs[0]]), t,
+                                 parent_key=gcik, ov_key=mem if kind == 'parent' else None)
+                e['cik'] = cik
+                # show only years this registrant actually has (FY2019-22 appear once --history is fetched)
+                # (income-statement years; a prior year-end equity balance alone still feeds the ROE average)
+                have = [y for y in YEARS if any(e['metrics'][k].get(str(y)) is not None
+                                                for k in ('revenue', 'net_income', 'total_assets'))]
+                if have:
+                    e['years'] = list(range(have[0], have[-1] + 1))
+                    keep = {str(y) for y in range(have[0] - 1, have[-1] + 1)}   # + prior year-end equity
+                    e['metrics'] = {k: {y: v for y, v in mv.items() if y in keep} for k, mv in e['metrics'].items()}
+                e['filings'] = sorted(used.get(cik, []), reverse=True)
+                if not any(v is not None for k, mv in e['metrics'].items() if k != 'roe_pct' for v in mv.values()):
+                    continue
                 blk['entities'].append(e)
-                s = segment_blocks(seg, mem, e['metrics']['equity'], e['metrics']['net_income'])
-                if s: blk['segments'][label] = s
+                s_ = segment_blocks(seg_m, cik, e['metrics']['equity'], e['metrics']['net_income'])
+                if s_:
+                    live = {y for r in s_ for mv in r['metrics'].values() for y, v in mv.items() if v is not None}
+                    for r in s_:
+                        for fld in ('metrics',):
+                            r[fld] = {k: {y: v for y, v in mv.items() if y in live} for k, mv in r[fld].items()}
+                        for fld in ('allocated_equity', 'asset_share', 'roe_pct', 'roe_pct_derived'):
+                            if isinstance(r.get(fld), dict):
+                                r[fld] = {y: v for y, v in r[fld].items() if y in live}
+                    blk['segments'][label] = s_
         if blk['entities']:
             result[t] = blk
     out = collections.OrderedDict([
-        ('_schema_version', '1.0'),
+        ('_schema_version', '1.1'),
         ('_generated', dt.date.today().isoformat()),
-        ('_source', 'Latest 10-K XBRL instance per registrant (data\\_sec_xbrl, fetch_sec_xbrl.py). $ millions.'),
-        ('_method', 'Co-registrant facts are the dei:LegalEntityAxis-dimensioned facts of the combined 10-K '
-                    '(explicit member map, no fuzzy matching); parent = undimensioned facts. Segments = ASC 280 '
-                    'StatementBusinessSegmentsAxis facts (managerial view - NOT comparable to FERC Form 1 '
-                    'jurisdictional figures, which are in opco_financials.json). Entity ROE derived = NI / avg equity.'),
+        ('_source', 'Latest 10-K XBRL instance per registrant, plus the FY2023/2021/2019 10-Ks when fetched with '
+                    'fetch_sec_xbrl.py --history (data\\_sec_xbrl). $ millions.'),
+        ('_method', 'Co-registrants are identified by the dei:EntityCentralIndexKey each combined 10-K tags on its '
+                    'LegalEntityAxis members (so a renamed member in an older filing still maps to the same CIK); '
+                    'parent = undimensioned facts. Where filings overlap, the newer filing wins (restated figures). '
+                    'Segments = ASC 280 StatementBusinessSegmentsAxis facts (managerial view - NOT comparable to FERC '
+                    'Form 1 jurisdictional figures in opco_financials.json). Entity ROE derived = NI / avg equity.'),
         ('_segment_roe_allocation', 'DERIVED: segment ROE = segment net income / allocated equity; allocated equity = '
                     'registrant year-end total equity x (segment year-end total assets / sum of all segment rows\' '
                     'total assets, Corporate & Other included where printed). An allocation, not a filing: holdco '
                     'debt is spread across segments by asset weight. Blank where the filer prints no segment NI '
                     'or no segment assets.'),
-        ('_history_note', 'FY2023-2025 from the current 10-Ks (income 3 yrs, balance sheet 2 yrs -> 2023 ROE uses '
-                    'year-end equity only). Extending to 2019 needs the FY2022 and FY2019 10-Ks.'),
+        ('_history_note', 'Years present depend on which 10-Ks are on disk: the latest 10-K alone gives FY2023-25 income '
+                    'and FY2024-25 balance sheets; adding the FY2023/2021/2019 10-Ks (fetch_sec_xbrl.py --history) '
+                    'gives FY2017-25 income statements and FY2018-25 balance sheets unbroken.'),
         ('tickers', result)])
     json.dump(out, open(outp, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
     print('wrote', outp, len(result), 'tickers', sum(len(b['entities']) for b in result.values()), 'entities')

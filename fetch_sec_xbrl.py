@@ -15,12 +15,20 @@ every opco comes back as its parent (probed 2026-09-23, FPL CIK 37634 -> NEXTERA
   python fetch_sec_xbrl.py              # fetch anything missing (incremental)
   python fetch_sec_xbrl.py --force      # re-fetch everything
   python fetch_sec_xbrl.py --dry-run    # list what would be fetched
+  python fetch_sec_xbrl.py --history    # ALSO fetch the FY2023, FY2021 and FY2019 10-Ks
+
+History: each 10-K prints 3 income-statement years and 2 balance sheets, so FY2025 + FY2023 +
+FY2021 + FY2019 give an unbroken FY2017-2025 income statement AND year-end balance sheets
+2018-2025 (ROE on average equity every year). Recorded per registrant under 'history' in the
+manifest; build_sec_opco.py merges them, the newer filing winning where years overlap
+(restatements).
 
 Writes  data\_sec_xbrl\<acc>_<primary>_htm.xml   (one per accession; combined filings shared)
         data\_sec_xbrl\_manifest.json            (ticker -> registrants -> accession / file)
 SEC etiquette: <10 req/sec, a real User-Agent (set SEC_UA="Name email"), Accept-Encoding.
 """
 import json, os, sys, time, gzip, urllib.request, urllib.error
+import datetime as dt
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAP = os.path.join(BASE, 'data', 'opco_cik_map.json')
@@ -28,13 +36,13 @@ OUT = os.path.join(BASE, 'data', '_sec_xbrl')
 # SEC blocks requests whose User-Agent has no real contact (403 on the first call, 2026-09-25).
 # Set it once per PowerShell session:  $env:SEC_UA = "Your Name you@example.com"
 UA = os.environ.get('SEC_UA', '').strip()
-SLEEP = 0.25
+SLEEP = 0.4
 COVERAGE = ['AEE', 'AEP', 'AQN', 'AWK', 'AWR', 'CMS', 'CWT', 'D', 'EIX', 'ES', 'ETR', 'EVRG',
             'GWRS', 'HE', 'HTO', 'MSEX', 'NEE', 'PCG', 'POR', 'PPL', 'TLN', 'VST', 'WTRG',
             'XIFR', 'YORW']
 
 
-def get(url, tries=5):
+def get(url, tries=8):
     # 503/429 = SEC throttling (hit after ~25 large downloads on 2026-09-25): back off and retry
     host = url.split('/')[2]
     for i in range(tries):
@@ -60,23 +68,54 @@ def get(url, tries=5):
             raise
 
 
+_SUBS = {}
+
+
+def all_10k(cik, need_before=None):
+    """Every 10-K in the registrant's submissions, newest first. The 'recent' block holds only the
+    last ~1,000 filings - a busy utility (8-Ks, 424Bs, 11-Ks) can run past that in 3-4 years - so
+    older pages (filings.files[]) are pulled when a year earlier than 'recent' covers is needed."""
+    if cik not in _SUBS:
+        d = json.loads(get('https://data.sec.gov/submissions/CIK%010d.json' % cik))
+        _SUBS[cik] = {'name': d.get('name'), 'blocks': [d.get('filings', {}).get('recent', {})],
+                      'pages': list(d.get('filings', {}).get('files', [])), 'loaded': set()}
+    S = _SUBS[cik]
+    def rows():
+        for b in S['blocks']:
+            for form, a, p, f in zip(b.get('form', []), b.get('accessionNumber', []),
+                                     b.get('primaryDocument', []), b.get('filingDate', [])):
+                if form == '10-K':
+                    yield {'accession': a, 'primary': p, 'filed': f, 'edgar_name': S['name']}
+    out = sorted(rows(), key=lambda k: k['filed'], reverse=True)
+    if need_before:
+        oldest = min((r['filed'] for r in out), default='9999')
+        for pg in S['pages']:
+            if oldest <= need_before or pg['name'] in S['loaded']:
+                continue
+            S['blocks'].append(json.loads(get('https://data.sec.gov/submissions/' + pg['name'])))
+            S['loaded'].add(pg['name'])
+            out = sorted(rows(), key=lambda k: k['filed'], reverse=True)
+            oldest = min((r['filed'] for r in out), default='9999')
+    return out
+
+
 def latest_10k(cik):
     """All 10-K filings from the registrant's most recent filing season (within 150 days of
     the newest). An opco can co-register on a securitization vehicle's small 10-K filed
     AFTER its own - e.g. VEPCO on Virginia Power Fuel Securitization LLC (2026-03-26) and
     SCE on its recovery-funding LLC (2026-03-24) - so 'newest 10-K' is the wrong pick;
     main() takes the candidate with the largest XBRL instance instead."""
-    import datetime as dt
-    d = json.loads(get('https://data.sec.gov/submissions/CIK%010d.json' % cik))
-    rec = d.get('filings', {}).get('recent', {})
-    ks = [{'accession': a, 'primary': p, 'filed': f, 'edgar_name': d.get('name')}
-          for form, a, p, f in zip(rec.get('form', []), rec.get('accessionNumber', []),
-                                   rec.get('primaryDocument', []), rec.get('filingDate', []))
-          if form == '10-K']
+    ks = all_10k(cik)
     if not ks:
         return []
     newest = dt.date.fromisoformat(ks[0]['filed'])
     return [k for k in ks if (newest - dt.date.fromisoformat(k['filed'])).days <= 150][:4]
+
+
+def fy_10k(cik, fy):
+    """10-Ks for fiscal year `fy` (filed Jan-Jun of fy+1; calendar-year filers)."""
+    ks = all_10k(cik, need_before=f'{fy + 1}-01-01')
+    return [k for k in ks if f'{fy + 1}-01-01' <= k['filed'] <= f'{fy + 1}-06-30'][:4]
 
 
 def instance_name(cik, acc):
@@ -124,6 +163,7 @@ def main():
             if o.get('cik') and o.get('status') == 'verified' and o.get('files_own_periodic'):
                 jobs.append((t, 'opco', o.get('ferc_name') or o.get('edgar_name'), int(o['cik'])))
 
+    history = '--history' in sys.argv
     manifest, seen, failed = {}, {}, []
     fetched = 0
     try:
@@ -171,6 +211,41 @@ def main():
                 print(f'  fetched {t:5} {name[:40]:40} {acc} {len(data)/1e6:.1f} MB{small}')
             rec['instance'] = inst
             rec['combined_with_parent'] = None   # resolved at parse time (dei:EntityCentralIndexKey members)
+            if history:
+                rec['history'] = []
+                for fy in (2023, 2021, 2019):
+                    try:
+                        hc = fy_10k(cik, fy)
+                    except Exception as e:
+                        failed.append((t, name, f'FY{fy} submissions: {e}')); continue
+                    hk, hbest = None, (None, -1)
+                    for c in hc:
+                        if c['accession'] not in seen:
+                            try:
+                                seen[c['accession']] = instance_name(cik, c['accession'])
+                            except Exception as e:
+                                failed.append((t, name, f'FY{fy} index: {e}')); seen[c['accession']] = None
+                        got = seen[c['accession']]
+                        if got and got[1] > hbest[1]:
+                            hk, hbest = c, got
+                    if not hk:
+                        rec['history'].append({'fy': fy, 'note': 'no 10-K with an XBRL instance found for this year'})
+                        continue
+                    hinst = hbest[0]
+                    hpath = os.path.join(OUT, f"{hk['accession']}_{hinst}")
+                    if dry:
+                        print(f"  would fetch {t:5} {name[:40]:40} FY{fy} {hk['accession']} {hinst}")
+                    elif force or not os.path.exists(hpath) or os.path.getsize(hpath) < 100_000:
+                        try:
+                            data = get('https://www.sec.gov/Archives/edgar/data/%d/%s/%s'
+                                       % (cik, hk['accession'].replace('-', ''), hinst))
+                        except Exception as e:
+                            failed.append((t, name, f'FY{fy} download: {e}')); continue
+                        open(hpath, 'wb').write(data)
+                        fetched += 1
+                        print(f"  fetched {t:5} {name[:40]:40} FY{fy} {hk['accession']} {len(data)/1e6:.1f} MB")
+                    rec['history'].append({'fy': fy, 'accession': hk['accession'], 'filed': hk['filed'],
+                                           'instance': hinst})
             manifest.setdefault(t, []).append(rec)
     finally:                                     # manifest is written even if the run dies midway
         if not dry:
