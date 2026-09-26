@@ -863,9 +863,13 @@ def _lt_iter(fb, passes=(1, 2)):
             thru = re.search(r'through (?:at least )?(20\d\d)', seg)
             # a printed window right after the match ('6% to 8% EPS CAGR 2026-2030') supplies BOTH years
             # when neither was found (2026-09-24); never overrides a year the phrases above found.
-            win_m = re.match(r'\s*(?:from\s+)?(20\d\d)E?\s*(?:' + DASH + r'|to|-)\s*(20\d\d)E?', fb[m.end(): m.end() + 22])
-            if win_m and not by and not thru:
-                by, thru = win_m, re.match(r'.*', '')   # placeholders; values set below
+            # 2026-09-26e: the window printed RIGHT AFTER the range now governs both years, even when the
+            # +-150-char phrase search found a year: that search reaches into neighbouring bullets
+            # (AEE Q1 2026 took 'through 2035' from the $31.8B pipeline bullet under '6% to 8% EPS CAGR
+            # 2026-2030'; AEE Q3 2025 / Q2 2026 lost the through-year because 'from/using 2025' set the
+            # base first). A footnote digit glued to the end year ('2026-20301,2') is not part of it.
+            win_m = re.match(r'\s*(?:from\s+)?(20\d\d)E?\s*(?:' + DASH + r'|to|-)\s*(20\d\d)(?=E?\d?(?:,\d)*\b|E?\D|E?$)', fb[m.end(): m.end() + 22])
+            if win_m and int(win_m.group(1)) < int(win_m.group(2)):
                 _wy = (win_m.group(1), win_m.group(2))
             else:
                 _wy = None
@@ -944,6 +948,17 @@ def _run_lt_pass3_controls():
     assert r and r['page'] == 17 and (r['rate_low_pct'], r['rate_high_pct']) == (6.0, 8.0), 'LT PREF CONTROL FAILED: %r' % (r,)
     w = next(_lt_iter("Expect 6% to 8% EPS CAGR 2026-2030 Strategically allocating capital", (1, 2)), None)
     assert w and (w['base_year'], w['through_year']) == ('2026', '2030'), 'LT WINDOW CONTROL FAILED: %r' % (w,)
+    # 2026-09-26e: the adjacent window beats a through-year from the NEXT bullet, and a base-year phrase
+    for txt, want in [
+        ("17 First Quarter 2026 Earnings Call | May 6, 2026 \u2022 Expect 6% to 8% EPS CAGR 2026-20301,2 \u2022 Strategically "
+         "allocating capital to fund strong infrastructure investment pipeline of $31.8 billion from 2026 through 2035", ('2026', '2030')),
+        ("\u2022 Remain on track to deliver strong long-term earnings growth \u2013 Expect 6% to 8% EPS CAGR from 2025-2029 using "
+         "2025 original EPS guidance range midpoint of $4.95 as the base1", ('2025', '2029')),
+        ("Long-term EPS growth of 5% to 7% from 2024 adjusted EPS guidance midpoint", ('2024', None)),
+        ("Reaffirming adjusted EPS growth target of 4% to 6% through 2026 off the original 2023 adjusted EPS guidance midpoint", ('2023', '2026')),
+    ]:
+        w = next(_lt_iter(txt, (1, 2)), None)
+        assert w and (w['base_year'], w['through_year']) == want, 'LT ADJACENT-WINDOW CONTROL FAILED: %r -> %r' % (txt[:50], w and (w['base_year'], w['through_year']))
     _pc['__lt_x'] = [(1, "Expect 6 to 8% annual growth rate through 2026, off the 2024 adjusted EPS expectations range")]
     try:
         assert lt_growth('XIFR', {'id': '__lt_x'}) is None, 'LT XIFR CONTROL FAILED'
