@@ -50,12 +50,35 @@ from datetime import datetime
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+# Defaults (2026-09-26): a bare `python scripts\fetch_market_data.py` now works. The key
+# comes from --apikey, else $FMP_API_KEY / $FMP_KEY, else REACT_APP_FMP_KEY in the app's
+# .env.production / .env.local (the same key the dashboard ships with).
+ROOT = r"E:\PowerAcademy"
+def _fmp_key_default():
+    for v in ("FMP_API_KEY", "FMP_KEY"):
+        if os.environ.get(v):
+            return os.environ[v].strip()
+    for fn in (".env.production", ".env.local", ".env"):
+        p = os.path.join(ROOT, "app", "poweracademy", fn)
+        if not os.path.exists(p):
+            continue
+        raw = open(p, "rb").read()
+        txt = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig", "replace")
+        for line in txt.splitlines():
+            if line.strip().startswith("REACT_APP_FMP_KEY="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return None
+
 parser = argparse.ArgumentParser()
-parser.add_argument("--capiq",  required=True, help="Path to capiq_export.json")
-parser.add_argument("--out",    required=True, help="Output path for market_data.json")
-parser.add_argument("--apikey", required=True, help="FMP API key")
+parser.add_argument("--capiq",  default=os.path.join(ROOT, "data", "capiq_export.json"), help="Path to capiq_export.json")
+parser.add_argument("--out",    default=os.path.join(ROOT, "data", "market_data.json"), help="Output path for market_data.json")
+parser.add_argument("--apikey", default=None, help="FMP API key (default: env or app .env files)")
 parser.add_argument("--delay",  type=float, default=0.25, help="Seconds between FMP calls")
 args = parser.parse_args()
+if not args.apikey:
+    args.apikey = _fmp_key_default()
+if not args.apikey:
+    parser.error("no FMP key: pass --apikey, set FMP_API_KEY, or put REACT_APP_FMP_KEY in app\\poweracademy\\.env.production")
 
 # ---------------------------------------------------------------------------
 # Load capiq + IP rate base
