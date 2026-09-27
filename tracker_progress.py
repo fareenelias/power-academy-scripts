@@ -110,7 +110,7 @@ def main():
 
     if args.write:
         if BEGIN in text and END in text:
-            new = re.sub(re.escape(BEGIN) + r".*?" + re.escape(END), block, text, flags=re.S)
+            new = re.sub(re.escape(BEGIN) + r".*?" + re.escape(END), lambda _m: block, text, flags=re.S)   # lambda: a plain string template turned "scripts\\tracker" into a TAB
         else:
             # first insertion: before the Snapshot section
             anchor = "\n## Snapshot"
