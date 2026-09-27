@@ -16,19 +16,19 @@ import sys, os, re, json, datetime, urllib.parse, urllib.request
 DATA = sys.argv[1] if len(sys.argv) > 1 else r'E:\PowerAcademy\data'
 Q = 'https://services.arcgis.com/cJ9YHowT8TU7DUyn/arcgis/rest/services/Water_System_Boundaries/FeatureServer/0/query'
 RULES = {
-    'AWK': (r'(CALIFORNIA-AMERICAN|CAL AMERICAN|^MO AMERICAN|^TN AMERICAN|TENNESSEE AMERICAN|^IL AMERICAN|INDIANA AMERICAN|^PA[ -]AMERICAN|^NJ AMERICAN|^NJAW|MARYLAND AMERICAN|IOWA[ -]AMERICAN|VIRGINIA-AMERICAN|^VA AMERICAN WATER|KENTUCKY[ -]AMERICAN|WEST VIRGINIA[ -]AMERICAN|HAWAII[ -]AMERICAN|NEW YORK AMERICAN)',
-            'CA,HI,IA,IL,IN,KY,MD,MO,NJ,NY,PA,TN,VA,WV', ['%AMERICAN%', 'NJAW%'], 'American Water Works'),
+    'AWK': (r'(CALIFORNIA-AMERICAN|CAL AMERICAN|^MO AMERICAN|^TN AMERICAN|TENNESSEE AMERICAN|^IL AMERICAN|INDIANA AMERICAN|^PA[ -]AMERICAN|^NJ AMERICAN|^NJAW|MARYLAND AMERICAN|IOWA[ -]AMERICAN|VIRGINIA-AMERICAN|^VA AMERICAN WATER|KENTUCKY[ -]AMERICAN|WEST VIRGINIA[ -]AMERICAN|HAWAII[ -]AMERICAN|NEW YORK AMERICAN|^PA AMER |^PAWC|^CAL[- ]AM[ -]|^WVAWC)',
+            'CA,HI,IA,IL,IN,KY,MD,MO,NJ,NY,PA,TN,VA,WV', ['%AMERICAN%', 'NJAW%', 'PA AMER %', 'PAWC%', 'CAL AM%', 'CAL-AM%', 'WVAWC%'], 'American Water Works'),
     'WTRG': (r'^AQUA (ILLINOIS|INDIANA|NJ|OHIO|PA|NORTH CAROLINA|TEXAS|VIRGINIA)|^AQUA SHENANDOAH', 'PA,OH,TX,IL,NC,NJ,IN,VA', ['AQUA%'], 'Essential Utilities'),
     'CWT': (r'CAL WATER SERVICE|CAL WATER SVC|^CALIFORNIA WATER SERVICE', 'CA', ['%CAL WATER%', 'CALIFORNIA WATER SERVICE%'], 'California Water Service Group'),
     'AWR': (r'^GOLDEN STATE W|^GSWC', 'CA', ['GOLDEN STATE%', 'GSWC%'], 'American States Water'),
     'HTO': (r'^SAN JOSE WATER$|^SJWTX|^MAINE WATER COMPANY', 'CA,TX,ME,CT', ['SAN JOSE WATER%', 'SJWTX%', 'MAINE WATER COMPANY%'], 'H2O America'),
-    'MSEX': (r'^MIDDLESEX WATER COMPANY$', 'NJ,DE', ['MIDDLESEX WATER COMPANY%'], 'Middlesex Water'),
+    'MSEX': (r'^MIDDLESEX WATER COMPANY$|\(TUI\)', 'NJ,DE', ['MIDDLESEX WATER COMPANY%', '%(TUI)%'], 'Middlesex Water'),
     'YORW': (r'^YORK WATER CO$|FRANKLIN SYSTEM YORK WATER', 'PA', ['%YORK WATER%'], 'York Water'),
     'GWRS': (r'^GW SANTA CRUZ WATER|^GW- BWC', 'AZ', ['GW%'], 'Global Water Resources'),
     'AQN': (r'^LIBERTY UTILITIES|^LIBERTY WATER (LPSCO|RIO RICO|NOEL)|^LIBERTY -YERMO|^LIBERTY-BELLVIEW|^LIBERTY - WOODSON', 'CA,AZ,AR,MO,NY', ['LIBERTY%'], 'Algonquin Power & Utilities (Liberty)'),
 }
 GAPS = {'HTO': 'Connecticut Water systems are not in the EPA layer under that name.',
-        'MSEX': 'Tidewater Utilities (DE) is not in the EPA layer.',
+        'MSEX': 'Tidewater Utilities (DE) matched via the "(TUI)" suffix; smaller Tidewater systems under other names may be missing.',
         'WTRG': 'Aqua Texas / North Carolina / Virginia systems use local names in the EPA layer and are missing; Peoples gas territory not included.',
         'CWT': 'Only California systems matched; Washington, New Mexico, Hawaii and Texas subsidiaries use local names.',
         'AWK': 'Military-contract systems (American Water O&M) excluded as non-regulated.',
