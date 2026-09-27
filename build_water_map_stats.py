@@ -5,7 +5,7 @@ Per ticker:
                         else (plant in service or gross PP&E) - accumulated depreciation. The water analogue of the electric 'NUP'
                         line on the Map (a rate-base proxy, not rate base: includes non-utility plant and acquisition adjustments where tagged).
   rate_base             company-stated rate base where a deck prints one (opco_guidance.json / Guidance_ip.json), with page link.
-  connections / population_served   sum over the EPA community-water-system boundaries in territories\{T}.geojson (water systems only).
+  connections / population_served / by_state   sum (and per-state split) over the EPA community-water-system boundaries in territories\{T}.geojson (water systems only).
 
     python scripts\build_water_map_stats.py [data_dir]
 """
@@ -76,6 +76,11 @@ def main():
             rec['water_systems'] = len(fs)
             rec['connections'] = int(sum((f['properties'].get('CONNECTIONS') or 0) for f in fs))
             rec['population_served'] = int(sum((f['properties'].get('POP_SERVED') or 0) for f in fs))
+            bs = {}
+            for f in fs:
+                p = f['properties']; b = bs.setdefault(p.get('STATE') or '?', {'connections': 0, 'population_served': 0, 'systems': 0})
+                b['connections'] += int(p.get('CONNECTIONS') or 0); b['population_served'] += int(p.get('POP_SERVED') or 0); b['systems'] += 1
+            rec['by_state'] = dict(sorted(bs.items(), key=lambda kv: -kv[1]['connections']))
         out[t] = rec
         print(t, rec.get('net_utility_plant_b'), rec.get('nup_basis'), (rec.get('rate_base') or {}).get('value_b'), len(rec.get('rate_base_parts') or []), rec.get('connections'))
     doc = {'_schema_version': '1.0', '_generated': datetime.date.today().isoformat(), '_method': __doc__.split('    python')[0].strip(),
